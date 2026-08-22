@@ -121,6 +121,13 @@ components, uses request timeouts, rejects non-2xx responses, and redacts
 credential-shaped values from errors. Cached data is labelled by its fetch time;
 it is never presented as live when Sentry is unavailable.
 
+Bearer headers are streamed directly from the keyring into curl's stdin and
+never written to a temporary curl config. Sentry responses are capped at 4 MiB,
+and the shell incrementally collects at most 1 MiB of helper output before it
+will refuse to parse it. Agent handoff sends the bounded diagnostic packet over
+a private, one-time FIFO in the user's runtime directory; only a generic
+instruction and opaque FIFO path appear in process arguments.
+
 Trace is a thin inbox, not a replacement for Sentry. One connection represents
 one Sentry organization; switching organizations deliberately means
 reconnecting. Search and the project picker operate on the current bounded

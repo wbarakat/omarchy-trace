@@ -49,7 +49,9 @@ status line.
 Agent handoff uses `omarchy agent prompt`, never provider-specific commands.
 Trace sends a bounded diagnostic packet only after confirmation, marks every
 Sentry field as untrusted data, and asks the agent not to modify files unless
-the user explicitly requests that in the agent session.
+the user explicitly requests that in the agent session. The packet reaches the
+agent through a private, expiring FIFO; diagnostic content never enters process
+arguments, the environment, the clipboard, or a disk file.
 
 ## Setup
 
@@ -64,8 +66,8 @@ The first-run window asks for:
 
 The non-secret configuration is stored at `~/.config/trace/config.json` with
 mode `0600`; issue caches live under `~/.cache/trace/`, also private. Tokens
-are retrieved with `secret-tool` and passed to curl through stdin/config, never
-as an argument.
+are retrieved with `secret-tool` and streamed to curl through stdin, never
+written to a curl config file or passed as an argument.
 
 Demo mode requires no setup and uses checked-in realistic fixtures. It is a
 first-class judging path rather than a second mock UI.
@@ -89,7 +91,8 @@ round trip.
 
 Requests must set timeouts, honor non-2xx responses, redact secrets from error
 text, validate URL/organization/issue identifiers, and never evaluate remote
-data as shell or rich text.
+data as shell or rich text. Curl rejects responses over 4 MiB, and the shell
+stops incremental collection at 1 MiB before parsing helper output.
 
 ## Visual direction
 

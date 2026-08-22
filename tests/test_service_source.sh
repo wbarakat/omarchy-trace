@@ -21,6 +21,10 @@ grep -q 'enqueue(kind, \[id\].*demoMode)' Service.qml || fail "demo actions must
 grep -q 'applyDemoAction' Service.qml || fail "demo actions must update the local model"
 grep -q 'selectedDetail = null' Service.qml || fail "selection scope changes must clear stale detail"
 grep -q 'running: root.configured || root.demoMode' Service.qml || fail "polling must wait for status/configuration"
-grep -q 'command: \["omarchy", "default", "agent"\]' Service.qml || fail "handoff must honor the Omarchy default agent"
-grep -q 'Quickshell.execDetached(\["omarchy", "agent", "prompt", prompt\])' Service.qml || fail "handoff must use Omarchy's native prompt command"
+grep -q 'trace-agent-handoff.sh' Service.qml || fail "handoff must use the checked-in stdin helper"
+grep -q '_agentPrompt = JSON.stringify' Service.qml || fail "handoff payload must use the bounded stdin protocol"
+grep -q 'write(root._agentPrompt' Service.qml || fail "handoff payload must be written over stdin"
+grep -q 'maxHelperOutputChars' Service.qml || fail "helper output must have a hard collection limit"
+grep -q 'stdout: SplitParser' Service.qml || fail "helper output must be collected incrementally"
+grep -q '\[helperPath, "--chunk-output"\]' Service.qml || fail "helper lines must be chunked before shell collection"
 printf 'test_service_source.sh ok\n'

@@ -13,6 +13,15 @@ CONFIG_FILE="$CONFIG_DIR/config.json"
 CACHE_DIR="$CACHE_HOME/trace"
 LIST_CACHE="$CACHE_DIR/list.json"
 
+# The shell asks for chunked output so its streaming parser never has to hold
+# an attacker-sized line. CLI output remains ordinary compact JSON.
+if [ "${1:-}" = --chunk-output ]; then
+  shift
+  set -o pipefail
+  "$0" "$@" | fold -w 4096
+  exit "${PIPESTATUS[0]}"
+fi
+
 TMP_FILES=""
 cleanup() {
   local f
@@ -88,32 +97,40 @@ write_config() {
 
 demo_enabled() { [ "${TRACE_DEMO:-0}" = 1 ] || [ "$DEMO" = 1 ]; }
 
-# curl reads its authorization header from this private config file.  The
-# token therefore does not appear in /proc/$pid/cmdline or shell arguments.
+# curl reads its authorization header from stdin. The token therefore never
+# enters a temporary file, /proc/$pid/cmdline, or the process environment.
 curl_api() {
-  local method=$1 url=$2 payload=${3:-} cfg body err token url_json method_json payload_json http rc
+  local method=$1 url=$2 payload=${3:-} body err token url_json method_json payload_json http rc max_bytes
   API_BODY=""; API_CODE=""; API_ERROR=""
   token=$(secret_lookup) || { API_ERROR="token unavailable"; return 1; }
   [ -n "$token" ] || { API_ERROR="token unavailable"; return 1; }
-  cfg=$(tmpfile); body=$(tmpfile); err=$(tmpfile)
+  [[ "$token" =~ ^[A-Za-z0-9._~-]{1,4096}$ ]] \
+    || { token=""; API_ERROR="token format is invalid"; return 1; }
+  max_bytes=${TRACE_MAX_RESPONSE_BYTES:-4194304}
+  [[ "$max_bytes" =~ ^[0-9]+$ ]] && [ "$max_bytes" -ge 65536 ] && [ "$max_bytes" -le 16777216 ] \
+    || { API_ERROR="invalid response size limit"; return 1; }
+  body=$(tmpfile); err=$(tmpfile)
   url_json=$(jq -nr --arg v "$url" '$v|@json')
   method_json=$(jq -nr --arg v "$method" '$v|@json')
-  {
-    printf 'url = %s\n' "$url_json"
-    printf 'request = %s\n' "$method_json"
-    printf 'connect-timeout = %s\nmax-time = %s\n' "${TRACE_CONNECT_TIMEOUT:-10}" "${TRACE_MAX_TIME:-30}"
-    printf 'silent\nshow-error\nfail-with-body\n'
-    printf 'header = %s\n' "$(jq -nr --arg v "Authorization: Bearer $token" '$v|@json')"
-    printf 'header = %s\n' "$(jq -nr --arg v 'Accept: application/json' '$v|@json')"
-    if [ -n "$payload" ]; then
-      payload_json=$(jq -nr --arg v "$payload" '$v|@json')
-      printf 'header = %s\n' "$(jq -nr --arg v 'Content-Type: application/json' '$v|@json')"
-      printf 'data = %s\n' "$payload_json"
-    fi
-  } >"$cfg"
-  http="$("${TRACE_CURL_BIN:-curl}" --config "$cfg" --output "$body" --write-out '%{http_code}' 2>"$err")"
+  http="$({
+      printf 'url = %s\n' "$url_json"
+      printf 'request = %s\n' "$method_json"
+      printf 'connect-timeout = %s\nmax-time = %s\n' "${TRACE_CONNECT_TIMEOUT:-10}" "${TRACE_MAX_TIME:-30}"
+      printf 'silent\nshow-error\nfail-with-body\n'
+      printf 'header = "Authorization: Bearer %s"\n' "$token"
+      printf 'header = %s\n' "$(jq -nr --arg v 'Accept: application/json' '$v|@json')"
+      if [ -n "$payload" ]; then
+        payload_json=$(jq -nr --arg v "$payload" '$v|@json')
+        printf 'header = %s\n' "$(jq -nr --arg v 'Content-Type: application/json' '$v|@json')"
+        printf 'data = %s\n' "$payload_json"
+      fi
+    } | "${TRACE_CURL_BIN:-curl}" --config - --max-filesize "$max_bytes" \
+      --output "$body" --write-out '%{http_code}' 2>"$err")"
   rc=$?
+  token=""
+  if [ "$rc" -eq 63 ]; then API_ERROR="Sentry response exceeded the size limit"; return 1; fi
   if [ "$rc" -ne 0 ]; then API_ERROR="request failed"; return 1; fi
+  [ "$(wc -c <"$body")" -le "$max_bytes" ] || { API_ERROR="Sentry response exceeded the size limit"; return 1; }
   if ! [[ "$http" =~ ^[0-9]{3}$ ]] || [ "$http" -lt 200 ] || [ "$http" -ge 300 ]; then
     API_CODE="$http"; API_BODY="$body"; API_ERROR="Sentry returned HTTP $http"; return 1
   fi
@@ -191,7 +208,7 @@ normalize_detail() {
   local issue=$1 event=$2
   jq -cn --slurpfile i "$issue" --slurpfile e "$event" '
     def text: (if . == null then "" elif type == "string" then (gsub("[[:cntrl:]]"; "") | gsub("\\u007f"; "") | .[0:2000]) else tostring end);
-    def safe: if type == "string" then (gsub("[[:cntrl:]]"; "") | gsub("\\u007f"; "") | .[0:1000]) elif type == "array" then map(safe)[0:100] elif type == "object" then with_entries(.value |= safe) else . end;
+    def safe: if type == "string" then (gsub("[[:cntrl:]]"; "") | gsub("\\u007f"; "") | .[0:1000]) elif type == "array" then map(safe)[0:100] elif type == "object" then (to_entries[0:100] | map(.value |= safe) | from_entries) else . end;
     def frame: {filename:((.filename // .absPath // .module // "")|text), function:((.function // .name // "")|text), module:((.module // "")|text), line:(.lineNo // .line // null), column:(.colNo // .column // null), context:((.context_line // .context // "")|text), inApp:(.inApp // .in_app // false), vars:(if (.vars|type)=="object" then (.vars|safe) else {} end)};
     def issue: ($i[0] | (
       def num: (if . == null then 0 elif type=="number" then . elif (tonumber? // null)!=null then tonumber else 0 end);
@@ -200,7 +217,7 @@ normalize_detail() {
       def inbox: (if has("inInbox") then (.inInbox|boolean) elif has("in_inbox") then (.in_inbox|boolean) else (.inbox != null) end);
       {id:(.id|text), shortId:((.shortId // .short_id // .id)|text), title:((.title // .metadata.value // .culprit // "Untitled")|text), culprit:(.culprit|text), project:((.project.slug // .project.name // .project // "")|text), environment:((.environment // .matchingEventEnvironment)|text), level:((.level // "error")|text), priority:((.priority // "")|tostring|ascii_downcase|if .=="high" or .=="medium" or .=="low" then . else "" end), hasSeen:seen, inInbox:inbox, status:((.status // "unresolved")|text), substatus:((.substatus // .statusDetails.substatus // "")|text), isUnhandled:(.isUnhandled // .is_unhandled // false), isRegression:((.isRegression // .is_regression // (.substatus == "regressed")) == true), count:(.count|num), userCount:((.userCount // .user_count)|num), firstSeen:((.firstSeen // .first_seen)|text), lastSeen:((.lastSeen // .last_seen)|text), assignedTo:(if .assignedTo == null then "" elif (.assignedTo|type)=="object" then ((.assignedTo.name // .assignedTo.email // .assignedTo.id)|text) else (.assignedTo|text) end), permalink:((.permalink // .web_url // "")|text)}));
     ($e[0].entries // [] | map(select(.type == "exception" or .type == "stacktrace")) | .[0].data.values[0].stacktrace.frames // []) as $frames |
-    {schemaVersion:1,state:"ready",issue:issue,metadata:(($i[0].metadata // {}) | if type=="object" then with_entries(.value |= text) else {} end),tags:(($e[0].tags // $i[0].tags // []) | if type=="array" then map(if type=="array" then {key:(.[0]|text),value:(.[1]|text)} elif type=="object" then {key:(.key // .name // ""|text),value:(.value // ""|text)} else empty end) else [] end),stacktrace:($frames|map(frame)),breadcrumbs:(($e[0].breadcrumbs.values // []) | if type=="array" then map({timestamp:(.timestamp|text),category:(.category|text),message:(.message // .data // ""|text),level:(.level|text)}) else [] end)}
+    {schemaVersion:1,state:"ready",issue:issue,metadata:(($i[0].metadata // {}) | if type=="object" then (to_entries[0:100] | map(.value |= text) | from_entries) else {} end),tags:(($e[0].tags // $i[0].tags // []) | if type=="array" then [map(if type=="array" then {key:(.[0]|text),value:(.[1]|text)} elif type=="object" then {key:(.key // .name // ""|text),value:(.value // ""|text)} else empty end)[]][0:100] else [] end),stacktrace:($frames|map(frame))[0:100],breadcrumbs:(($e[0].breadcrumbs.values // []) | if type=="array" then [map({timestamp:(.timestamp|text),category:(.category|text),message:(.message // .data // ""|text),level:(.level|text)})[]][0:100] else [] end)}
   '
 }
 

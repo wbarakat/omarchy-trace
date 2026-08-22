@@ -25,6 +25,10 @@ jq -e '.issues[] | select(.id == "9876543210") | .priority == "medium" and .hasS
 limited=$(run_api list 10); assert_json "$limited"
 [ "$(jq '.issues|length' <<<"$limited")" -le 10 ]
 
+chunked=$(TRACE_DEMO=1 "$API" --chunk-output list 10)
+assert_json "$(tr -d '\n' <<<"$chunked")"
+[ "$(awk 'length > max { max = length } END { print max + 0 }' <<<"$chunked")" -le 4096 ]
+
 detail=$(run_api detail 1234567890); assert_json "$detail"
 jq -e '.issue.id == "1234567890" and (.stacktrace|length) > 0 and (.breadcrumbs|length) > 0 and (.tags|length) > 0' <<<"$detail" >/dev/null
 for action in resolve assign review; do

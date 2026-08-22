@@ -14,6 +14,9 @@ if grep -nE 'command[^\n]*(token|apiKey|secret)' Service.qml; then
 fi
 grep -q 'stdinEnabled: true' Service.qml || fail "setup requires Process stdin"
 grep -q 'write(root._inputPayload' Service.qml || fail "setup payload must be written over stdin"
+if grep -q 'execDetached(\["omarchy", "agent", "prompt"' Service.qml; then
+  fail "diagnostic context must never be passed to the agent in process arguments"
+fi
 grep -q 'function openProjectMenu' App.qml || fail "project picker needs a keyboard entry point"
 grep -q 'function moveProjectMenu' App.qml || fail "project picker needs a keyboard movement method"
 grep -q 'function chooseProjectMenu' App.qml || fail "project picker needs a keyboard selection method"
@@ -33,5 +36,9 @@ grep -q 'function actionDescription' App.qml || fail "confirmations must explain
 grep -q 'agent may transmit this context to its provider' App.qml || fail "agent handoff confirmation must disclose external context"
 if grep -nE 'bash[" ]*,[" ]*-c|sh[" ]*,[" ]*-c|\| *bash|\| *sh' Service.qml; then
   fail "Service must not evaluate remote data as shell code"
+fi
+grep -q -- '--config - --max-filesize' scripts/trace-api.sh || fail "Sentry requests must stream credentials and cap responses"
+if grep -qE -- '--config[[:space:]]+"?\$cfg' scripts/trace-api.sh; then
+  fail "curl credentials must never be written to a config file"
 fi
 printf 'test_source.sh ok\n'

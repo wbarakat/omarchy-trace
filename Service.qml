@@ -20,6 +20,10 @@ Item {
   readonly property string pluginDir: manifest && manifest.__sourceDir
     ? String(manifest.__sourceDir) : String(Qt.resolvedUrl(".")).replace(/^file:\/\//, "").replace(/\/$/, "")
   readonly property string helperPath: pluginDir + "/scripts/trace-api.sh"
+  readonly property string agentHelperPath: pluginDir + "/scripts/trace-agent-handoff.sh"
+  readonly property int maxHelperOutputChars: 1048576
+  readonly property int maxHelperErrorChars: 16384
+  readonly property int maxAgentOutputChars: 4096
 
   property var settings: defaultSettingValues
   readonly property var defaultSettingValues: ({
@@ -70,6 +74,8 @@ Item {
   property string _selectedId: ""
   property string _agentPrompt: ""
   property string _agentStdout: ""
+  property bool _outputOverflow: false
+  property bool _errorOverflow: false
 
   function setting(name, fallback) {
     var value = settings ? settings[name] : undefined
@@ -222,7 +228,7 @@ Item {
   }
 
   function explainIssue(issue, detail) {
-    if (agentProbe.running) {
+    if (agentHandoff.running) {
       message = "Agent handoff is already starting."
       return
     }
@@ -231,9 +237,32 @@ Item {
       message = "Select an issue before handing it off."
       return
     }
-    _agentPrompt = prompt
+    _agentPrompt = JSON.stringify({ prompt: prompt })
     _agentStdout = ""
-    agentProbe.running = true
+    agentHandoff.running = true
+  }
+
+  function collectHelperOutput(data, isError) {
+    var chunk = String(data || "")
+    var current = isError ? _stderr : _stdout
+    var limit = isError ? maxHelperErrorChars : maxHelperOutputChars
+    var remaining = Math.max(0, limit - current.length)
+    if (remaining > 0) {
+      if (isError) _stderr += chunk.substring(0, remaining)
+      else _stdout += chunk.substring(0, remaining)
+    }
+    if (chunk.length > remaining) {
+      if (isError) _errorOverflow = true
+      else _outputOverflow = true
+      if (apiProcess.running) apiProcess.running = false
+    }
+  }
+
+  function collectAgentOutput(data) {
+    var chunk = String(data || "")
+    var remaining = Math.max(0, maxAgentOutputChars - _agentStdout.length)
+    if (remaining > 0) _agentStdout += chunk.substring(0, remaining)
+    if (chunk.length > remaining && agentHandoff.running) agentHandoff.running = false
   }
 
   // The token is deliberately absent from command.  Process.write is used
@@ -282,7 +311,9 @@ Item {
     _inputPayload = entry.payload || ""
     _stdout = ""
     _stderr = ""
-    var command = [helperPath]
+    _outputOverflow = false
+    _errorOverflow = false
+    var command = [helperPath, "--chunk-output"]
     if (entry.demo) command.push("--demo")
     command.push(entry.operation)
     for (var i = 0; i < entry.args.length; i++) command.push(String(entry.args[i]))
@@ -303,27 +334,24 @@ Item {
   }
 
   Process {
-    id: agentProbe
-    command: ["omarchy", "default", "agent"]
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root._agentStdout = text
+    id: agentHandoff
+    command: [root.agentHelperPath]
+    stdinEnabled: true
+    onStarted: {
+      write(root._agentPrompt + "\n")
+      root._agentPrompt = ""
+    }
+    stdout: SplitParser {
+      splitMarker: "\n"
+      onRead: function(data) { root.collectAgentOutput(data) }
     }
     onExited: function(exitCode) {
-      var prompt = root._agentPrompt
       root._agentPrompt = ""
-      if (exitCode !== 0) {
-        root.message = "Could not determine the default Omarchy agent."
-        return
-      }
-      var agent = Model.shortText(root._agentStdout)
-      if (!agent) {
-        root.message = "Choose a default agent, then press [i] again."
-        Quickshell.execDetached(["omarchy", "menu", "summon", "setup.default.agent"])
-        return
-      }
-      Quickshell.execDetached(["omarchy", "agent", "prompt", prompt])
-      root.message = "Handed off to " + agent + "."
+      var response = null
+      try { response = JSON.parse(root._agentStdout) } catch (ignore) {}
+      root._agentStdout = ""
+      if (response && response.message) root.message = Model.sanitize(response.message)
+      else root.message = exitCode === 0 ? "Agent handoff started." : "Could not launch the configured Omarchy agent."
     }
   }
 
@@ -338,8 +366,14 @@ Item {
         root._inputPayload = ""
       }
     }
-    stdout: StdioCollector { id: apiOutput; waitForEnd: true; onStreamFinished: root._stdout = text }
-    stderr: StdioCollector { id: apiErrors; waitForEnd: true; onStreamFinished: root._stderr = text }
+    stdout: SplitParser {
+      splitMarker: "\n"
+      onRead: function(data) { root.collectHelperOutput(data, false) }
+    }
+    stderr: SplitParser {
+      splitMarker: "\n"
+      onRead: function(data) { root.collectHelperOutput(data, true) }
+    }
     onExited: function(exitCode) {
       var operation = ""
       // The command remains available until the next pump, so operation is
@@ -347,7 +381,17 @@ Item {
       operation = root._currentOperation
       root.loading = operation === "list" ? false : root.loading
       root.detailLoading = operation === "detail" ? false : root.detailLoading
-      var output = String(apiOutput.text || root._stdout || "").trim()
+      if (root._outputOverflow || root._errorOverflow) {
+        root.loading = false
+        root.detailLoading = false
+        root.state = "error"
+        root.ready = false
+        root.message = "Trace helper output exceeded its safety limit."
+        root._inputPayload = ""
+        Qt.callLater(root.pump)
+        return
+      }
+      var output = String(root._stdout || "").trim()
       var isAction = ["resolve", "assign", "ignore", "review", "configure", "clear-token"].indexOf(operation) >= 0
       if (output !== "") {
         if (operation === "status") {
@@ -410,7 +454,7 @@ Item {
       } else if (exitCode !== 0 && operation !== "notify") {
         root.state = "error"
         root.ready = false
-        root.message = Model.sanitize(apiErrors.text || root._stderr || "Trace helper failed.")
+        root.message = Model.sanitize(root._stderr || "Trace helper failed.")
       }
       root._inputPayload = ""
       Qt.callLater(root.pump)

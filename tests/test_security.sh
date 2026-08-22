@@ -50,6 +50,58 @@ printf '%s\n' "$json_output" | jq -e '.state == "ready" and .configured == true'
 jq -e '.projects == ["web", "api"]' "$JSON_CONFIG/trace/config.json" >/dev/null
 jq -e '.environments == ["production", "us east"]' "$JSON_CONFIG/trace/config.json" >/dev/null
 
+# curl receives the bearer header only through stdin. Its argv contains a
+# response cap and never points at a token-bearing config file.
+cat >"$BIN/curl" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+config=$(cat)
+grep -Fq 'Authorization: Bearer __TEST_TOKEN__' <<<"$config"
+output="" max="" config_source=""
+printf '%s\n' "$*" >"$TRACE_TEST_CURL_ARGS"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --config) config_source=${2:-}; shift 2;;
+    --max-filesize) max=${2:-}; shift 2;;
+    --output) output=${2:-}; shift 2;;
+    --write-out) shift 2;;
+    *) shift;;
+  esac
+done
+[ "$config_source" = - ]
+[ "$max" = 65536 ]
+[ -n "$output" ]
+if [ "${TRACE_TEST_OVERSIZE:-0}" = 1 ]; then
+  head -c 65537 /dev/zero | tr '\0' x >"$output"
+else
+  printf '[]\n' >"$output"
+fi
+printf '200'
+SH
+sed -i "s/__TEST_TOKEN__/$TEST_TOKEN/g" "$BIN/curl"
+chmod 700 -- "$BIN/curl"
+
+CURL_CONFIG="$TMP/curl-config"
+CURL_CACHE="$TMP/curl-cache"
+mkdir -p -- "$CURL_CONFIG" "$CURL_CACHE"
+printf '%s\n' "$TEST_TOKEN" | PATH="$BIN:$PATH" XDG_CONFIG_HOME="$CURL_CONFIG" XDG_CACHE_HOME="$CURL_CACHE" \
+  "$API" configure --base-url https://sentry.example.test --organization acme --token-stdin >/dev/null
+curl_output=$(PATH="$BIN:$PATH" XDG_CONFIG_HOME="$CURL_CONFIG" XDG_CACHE_HOME="$CURL_CACHE" \
+  TRACE_CURL_BIN="$BIN/curl" TRACE_MAX_RESPONSE_BYTES=65536 TRACE_TEST_CURL_ARGS="$TMP/curl-args" "$API" list 10)
+jq -e '.state == "ready" and (.issues | length) == 0' <<<"$curl_output" >/dev/null
+! grep -Fq "$TEST_TOKEN" "$TMP/curl-args"
+grep -Fq -- '--config -' "$TMP/curl-args"
+grep -Fq -- '--max-filesize 65536' "$TMP/curl-args"
+if grep -nE 'jq .*Bearer|--arg[^[:cntrl:]]*\$token' "$ROOT/scripts/trace-api.sh"; then
+  printf 'token must not enter formatter process arguments\n' >&2
+  exit 1
+fi
+
+oversize_output=$(PATH="$BIN:$PATH" XDG_CONFIG_HOME="$CURL_CONFIG" XDG_CACHE_HOME="$TMP/no-cache" \
+  TRACE_CURL_BIN="$BIN/curl" TRACE_MAX_RESPONSE_BYTES=65536 TRACE_TEST_CURL_ARGS="$TMP/curl-args" \
+  TRACE_TEST_OVERSIZE=1 "$API" list 10 || :)
+jq -e '.state == "error" and .error.message == "Sentry response exceeded the size limit"' <<<"$oversize_output" >/dev/null
+
 # URL filters are encoded and repeated rather than interpolated raw.
 grep -qE 'project=\$\(urlencode "\$project"\)' "$ROOT/scripts/trace-api.sh"
 grep -qE 'environment=\$\(urlencode "\$environment"\)' "$ROOT/scripts/trace-api.sh"
