@@ -40,6 +40,12 @@ jq -e '.state == "ready" and .agent == "claude"' <<<"$output" >/dev/null
 [ "$(cat "$TMP/agent-capture")" = "$packet" ]
 ! grep -Fq "$secret" "$TMP/agent-args"
 grep -Fq 'cat --' "$TMP/agent-args"
+# The writer owns cleanup and may be scheduled a few milliseconds after the
+# fake reader closes. Wait for that asynchronous contract instead of racing it.
+for _ in {1..40}; do
+  [ -z "$(find "$RUNTIME" -mindepth 1 -print -quit)" ] && break
+  sleep 0.025
+done
 [ -z "$(find "$RUNTIME" -mindepth 1 -print -quit)" ]
 
 oversized=$(jq -cn --arg prompt "$(printf 'x%.0s' {1..12001})" '{prompt:$prompt}')
