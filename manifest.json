@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "id": "wbarakat.trace",
+  "name": "Trace",
+  "version": "0.1.0",
+  "author": "Waleed Barakat",
+  "license": "MIT",
+  "description": "A native Sentry inbox for new and regressed production errors.",
+  "kinds": ["service", "bar-widget", "panel"],
+  "activation": "on-demand",
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml",
+    "panel": "App.qml"
+  },
+  "barWidget": {
+    "displayName": "Trace",
+    "description": "Surface new and regressed Sentry issues in the bar.",
+    "category": "Development",
+    "aliases": ["trace", "sentry", "errors", "issues", "production"],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshIntervalSec": 300,
+      "maxIssues": 50
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 60,
+        "max": 3600,
+        "step": 60,
+        "defaultValue": 300
+      },
+      {
+        "key": "maxIssues",
+        "type": "integer",
+        "label": "Maximum issues to load",
+        "min": 10,
+        "max": 100,
+        "step": 10,
+        "defaultValue": 50
+      }
+    ]
+  }
+}

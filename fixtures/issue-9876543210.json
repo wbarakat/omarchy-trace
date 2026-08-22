@@ -1,0 +1,28 @@
+{
+  "id": "9876543210",
+  "shortId": "API-17",
+  "title": "TypeError: cannot read properties of undefined",
+  "culprit": "api.serializers.invoice.to_public",
+  "project": {"slug": "api", "name": "API"},
+  "environment": "production",
+  "level": "error",
+  "priority": "normal",
+  "hasSeen": true,
+  "inInbox": true,
+  "status": "unresolved",
+  "substatus": "",
+  "isUnhandled": true,
+  "isRegression": false,
+  "count": 86,
+  "userCount": 24,
+  "firstSeen": "2026-08-12T18:03:03.000Z",
+  "lastSeen": "2026-08-20T13:55:01.000Z",
+  "assignedTo": {"id": "42", "name": "on-call"},
+  "permalink": "https://sentry.io/organizations/acme/issues/9876543210/",
+  "metadata": {"type": "TypeError", "value": "cannot read properties of undefined"},
+  "tags": [["runtime", "node 22"], ["route", "/v1/invoices"]],
+  "entries": [{"type": "exception", "data": {"values": [{"type": "TypeError", "value": "cannot read properties of undefined", "stacktrace": {"frames": [
+    {"filename": "src/serializers/invoice.ts", "function": "to_public", "module": "api.serializers.invoice", "lineNo": 33, "colNo": 27, "context_line": "return { total: invoice.currency.amount };", "inApp": true, "vars": {"invoice_id": "inv_77"}}
+  ]}}]}}],
+  "breadcrumbs": {"values": [{"timestamp": "2026-08-20T13:55:00.992Z", "category": "navigation", "message": "/v1/invoices/77", "level": "info"}]}
+}

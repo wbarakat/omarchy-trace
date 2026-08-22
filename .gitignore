@@ -1,0 +1,5 @@
+.trace-test/
+*.log
+*.tmp
+preview-local.png
+

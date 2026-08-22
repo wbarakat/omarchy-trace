@@ -1,0 +1,35 @@
+{
+  "id": "1234567890",
+  "shortId": "WEB-42",
+  "title": "DatabaseError: connection pool exhausted",
+  "culprit": "checkout.handlers.submit_order",
+  "project": {"slug": "web", "name": "Web"},
+  "environment": "production",
+  "level": "error",
+  "priority": "high",
+  "hasSeen": false,
+  "inInbox": true,
+  "status": "unresolved",
+  "substatus": "ongoing",
+  "isUnhandled": true,
+  "isRegression": true,
+  "count": 1842,
+  "userCount": 317,
+  "firstSeen": "2026-08-17T09:12:42.000Z",
+  "lastSeen": "2026-08-20T14:09:11.000Z",
+  "assignedTo": null,
+  "permalink": "https://sentry.io/organizations/acme/issues/1234567890/",
+  "metadata": {"type": "DatabaseError", "value": "connection pool exhausted"},
+  "tags": [["browser", "Firefox 128"], ["region", "us-east-1"]],
+  "entries": [{
+    "type": "exception",
+    "data": {"values": [{"type": "DatabaseError", "value": "connection pool exhausted", "stacktrace": {"frames": [
+      {"filename": "app/checkout.py", "function": "submit_order", "module": "checkout.handlers", "lineNo": 118, "colNo": 19, "context_line": "    with db.transaction() as transaction:", "inApp": true, "vars": {"order_id": "ord_2048", "attempt": 2}},
+      {"filename": "app/http.py", "function": "dispatch", "module": "http.server", "lineNo": 74, "colNo": 8, "context_line": "    return handler(request)", "inApp": true, "vars": {"method": "POST", "path": "/checkout"}}
+    ]}}]}
+  }],
+  "breadcrumbs": {"values": [
+    {"timestamp": "2026-08-20T14:09:10.991Z", "category": "http", "message": "POST /checkout", "level": "info"},
+    {"timestamp": "2026-08-20T14:09:11.001Z", "category": "query", "message": "BEGIN", "level": "debug"}
+  ]}
+}

@@ -1,0 +1,403 @@
+#!/usr/bin/env bash
+# Trace's deliberately small Sentry boundary.  Every successful or failed
+# invocation writes one JSON value to stdout; diagnostics never go there.
+set -u
+umask 077
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+FIXTURE_DIR=${TRACE_FIXTURE_DIR:-"$SCRIPT_DIR/../fixtures"}
+CONFIG_HOME=${XDG_CONFIG_HOME:-"$HOME/.config"}
+CACHE_HOME=${XDG_CACHE_HOME:-"$HOME/.cache"}
+CONFIG_DIR="$CONFIG_HOME/trace"
+CONFIG_FILE="$CONFIG_DIR/config.json"
+CACHE_DIR="$CACHE_HOME/trace"
+LIST_CACHE="$CACHE_DIR/list.json"
+
+TMP_FILES=""
+cleanup() {
+  local f
+  for f in $TMP_FILES; do [ -n "$f" ] && rm -f -- "$f" 2>/dev/null || :; done
+}
+trap cleanup EXIT HUP INT TERM
+
+die() {
+  local code=$1 message=$2 exit_code=${3:-1}
+  if command -v jq >/dev/null 2>&1; then
+    jq -cn --arg code "$code" --arg message "$message" \
+      '{schemaVersion:1,state:"error",error:{code:$code,message:$message}}'
+  else
+    printf '{"schemaVersion":1,"state":"error","error":{"code":"%s","message":"%s"}}\n' \
+      "invalid" "backend unavailable"
+  fi
+  exit "$exit_code"
+}
+
+need_jq() { command -v jq >/dev/null 2>&1 || die dependency-missing "jq is required"; }
+need_jq
+
+tmpfile() {
+  local f
+  f=$(mktemp "${TMPDIR:-/tmp}/trace-api.XXXXXX") || die internal "could not create private temporary file"
+  chmod 600 -- "$f" 2>/dev/null || :
+  TMP_FILES="$TMP_FILES $f"
+  printf '%s' "$f"
+}
+
+valid_identifier() {
+  [[ ${1:-} =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]]
+}
+valid_url() {
+  local u=$1
+  [[ "$u" =~ ^https://[^[:space:]/?#]+(:[0-9]{1,5})?([^[:space:]?#]*)$ ]] || \
+    [[ "$u" =~ ^http://(localhost|127\.0\.0\.1)(:[0-9]{1,5})?([^[:space:]?#]*)$ ]]
+}
+clean_url() { printf '%s' "${1%/}"; }
+
+config_value() { jq -er --arg key "$1" '.[$key] // empty' "$CONFIG_FILE" 2>/dev/null; }
+config_exists() { [ -s "$CONFIG_FILE" ] && jq -e 'type == "object"' "$CONFIG_FILE" >/dev/null 2>&1; }
+
+load_config() {
+  config_exists || return 1
+  BASE_URL=$(config_value baseUrl) || return 1
+  ORG=$(config_value organization) || return 1
+  PROJECTS=$(jq -r '(.projects // []) | if type == "array" then map(tostring|gsub("^[[:space:]]+|[[:space:]]+$";""))|join(",") else tostring end' "$CONFIG_FILE" 2>/dev/null) || PROJECTS=""
+  # Older config files had no environment filter. Keep them usable while
+  # matching the setup UI's production default; an explicit blank means all.
+  ENVIRONMENTS=$(jq -r 'if has("environments") then (.environments // [] | if type == "array" then map(tostring|gsub("^[[:space:]]+|[[:space:]]+$";""))|join(",") else tostring end) else "production" end' "$CONFIG_FILE" 2>/dev/null) || ENVIRONMENTS="production"
+  valid_url "$BASE_URL" || return 1
+  valid_identifier "$ORG" || return 1
+  return 0
+}
+
+secret_lookup() {
+  command -v secret-tool >/dev/null 2>&1 || return 2
+  secret-tool lookup service trace base-url "$BASE_URL" organization "$ORG" 2>/dev/null
+}
+
+write_config() {
+  local base=$1 org=$2 projects=$3 environments=${4-production} file
+  mkdir -p -- "$CONFIG_DIR" 2>/dev/null || die config-error "could not create configuration directory"
+  chmod 700 -- "$CONFIG_DIR" 2>/dev/null || :
+  file=$(tmpfile)
+  jq -cn --arg base "$base" --arg org "$org" --arg projects "$projects" --arg environments "$environments" \
+    '{baseUrl:$base,organization:$org,projects:([ $projects | split(",")[] | gsub("^[[:space:]]+|[[:space:]]+$";"") | select(length > 0) ]),environments:([ $environments | split(",")[] | gsub("^[[:space:]]+|[[:space:]]+$";"") | select(length > 0) ])}' >"$file" || die config-error "could not write configuration"
+  chmod 600 -- "$file" 2>/dev/null || die config-error "could not protect configuration"
+  mv -f -- "$file" "$CONFIG_FILE" 2>/dev/null || die config-error "could not install configuration"
+  chmod 600 -- "$CONFIG_FILE" 2>/dev/null || die config-error "could not protect configuration"
+}
+
+demo_enabled() { [ "${TRACE_DEMO:-0}" = 1 ] || [ "$DEMO" = 1 ]; }
+
+# curl reads its authorization header from this private config file.  The
+# token therefore does not appear in /proc/$pid/cmdline or shell arguments.
+curl_api() {
+  local method=$1 url=$2 payload=${3:-} cfg body err token url_json method_json payload_json http rc
+  API_BODY=""; API_CODE=""; API_ERROR=""
+  token=$(secret_lookup) || { API_ERROR="token unavailable"; return 1; }
+  [ -n "$token" ] || { API_ERROR="token unavailable"; return 1; }
+  cfg=$(tmpfile); body=$(tmpfile); err=$(tmpfile)
+  url_json=$(jq -nr --arg v "$url" '$v|@json')
+  method_json=$(jq -nr --arg v "$method" '$v|@json')
+  {
+    printf 'url = %s\n' "$url_json"
+    printf 'request = %s\n' "$method_json"
+    printf 'connect-timeout = %s\nmax-time = %s\n' "${TRACE_CONNECT_TIMEOUT:-10}" "${TRACE_MAX_TIME:-30}"
+    printf 'silent\nshow-error\nfail-with-body\n'
+    printf 'header = %s\n' "$(jq -nr --arg v "Authorization: Bearer $token" '$v|@json')"
+    printf 'header = %s\n' "$(jq -nr --arg v 'Accept: application/json' '$v|@json')"
+    if [ -n "$payload" ]; then
+      payload_json=$(jq -nr --arg v "$payload" '$v|@json')
+      printf 'header = %s\n' "$(jq -nr --arg v 'Content-Type: application/json' '$v|@json')"
+      printf 'data = %s\n' "$payload_json"
+    fi
+  } >"$cfg"
+  http="$("${TRACE_CURL_BIN:-curl}" --config "$cfg" --output "$body" --write-out '%{http_code}' 2>"$err")"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then API_ERROR="request failed"; return 1; fi
+  if ! [[ "$http" =~ ^[0-9]{3}$ ]] || [ "$http" -lt 200 ] || [ "$http" -ge 300 ]; then
+    API_CODE="$http"; API_BODY="$body"; API_ERROR="Sentry returned HTTP $http"; return 1
+  fi
+  API_CODE="$http"; API_BODY="$body"; return 0
+}
+
+normalize_issue_jq=''
+normalize_issue() {
+  jq -c '
+    def text: (if . == null then "" elif type == "string" then (gsub("[[:cntrl:]]"; "") | gsub("\\u007f"; "") | .[0:1000]) else tostring end);
+    def number: (if . == null then 0 elif type == "number" then . elif (tonumber? // null) != null then tonumber else 0 end);
+    def boolean: (if . == true then true else false end);
+    def seen: (if has("hasSeen") then (.hasSeen|boolean) elif has("has_seen") then (.has_seen|boolean) else false end);
+    def inbox: (if has("inInbox") then (.inInbox|boolean) elif has("in_inbox") then (.in_inbox|boolean) else (.inbox != null) end);
+    {id:(.id|text), shortId:((.shortId // .short_id // .id)|text),
+     title:((.title // .metadata.value // .culprit // "Untitled")|text), culprit:(.culprit|text),
+     project:((.project.slug // .project.name // .project // "")|text), environment:((.environment // .matchingEventEnvironment)|text),
+     level:((.level // "error")|text), priority:((.priority // "")|tostring|ascii_downcase|if .=="high" or .=="medium" or .=="low" then . else "" end), hasSeen:seen, inInbox:inbox, status:((.status // "unresolved")|text),
+     substatus:((.substatus // .statusDetails.substatus // "")|text),
+     isUnhandled:((.isUnhandled // .is_unhandled // false)|boolean),
+     isRegression:((.isRegression // .is_regression // (.substatus == "regressed"))|boolean),
+     count:((.count)|number), userCount:((.userCount // .user_count)|number),
+     firstSeen:((.firstSeen // .first_seen)|text), lastSeen:((.lastSeen // .last_seen)|text),
+     assignedTo:(if .assignedTo == null then "" elif (.assignedTo|type)=="object" then ((.assignedTo.name // .assignedTo.email // .assignedTo.id)|text) else (.assignedTo|text) end),
+     permalink:((.permalink // .web_url // "")|text)}'
+}
+
+normalize_list() {
+  local source=$1 out=$2
+  jq -c --argjson source "${3:-false}" '
+    def issue: (
+      def text: (if . == null then "" elif type == "string" then (gsub("[[:cntrl:]]"; "") | gsub("\\u007f"; "") | .[0:1000]) else tostring end);
+      def number: (if . == null then 0 elif type == "number" then . elif (tonumber? // null) != null then tonumber else 0 end);
+      def boolean: (if . == true then true else false end);
+      def seen: (if has("hasSeen") then (.hasSeen|boolean) elif has("has_seen") then (.has_seen|boolean) else false end);
+      def inbox: (if has("inInbox") then (.inInbox|boolean) elif has("in_inbox") then (.in_inbox|boolean) else (.inbox != null) end);
+      {id:(.id|text), shortId:((.shortId // .short_id // .id)|text), title:((.title // .metadata.value // .culprit // "Untitled")|text), culprit:(.culprit|text), project:((.project.slug // .project.name // .project // "")|text), environment:((.environment // .matchingEventEnvironment)|text), level:((.level // "error")|text), priority:((.priority // "")|tostring|ascii_downcase|if .=="high" or .=="medium" or .=="low" then . else "" end), hasSeen:seen, inInbox:inbox, status:((.status // "unresolved")|text), substatus:((.substatus // .statusDetails.substatus // "")|text), isUnhandled:((.isUnhandled // .is_unhandled // false)|boolean), isRegression:((.isRegression // .is_regression // (.substatus == "regressed"))|boolean), count:((.count)|number), userCount:((.userCount // .user_count)|number), firstSeen:((.firstSeen // .first_seen)|text), lastSeen:((.lastSeen // .last_seen)|text), assignedTo:(if .assignedTo == null then "" elif (.assignedTo|type)=="object" then ((.assignedTo.name // .assignedTo.email // .assignedTo.id)|text) else (.assignedTo|text) end), permalink:((.permalink // .web_url // "")|text)}
+    );
+    (if type == "array" then . elif (.issues|type)=="array" then .issues else [] end) | map(issue)
+  ' "$source" >"$out" 2>/dev/null || return 1
+}
+
+emit_list() {
+  local issues=$1 state=${2:-ready} cached=${3:-false}
+  local fetched
+  fetched=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf '')
+  jq -cn --arg state "$state" --argjson cached "$cached" --arg fetchedAt "$fetched" --slurpfile issues "$issues" \
+    '{schemaVersion:1,state:$state,ready:($state == "ready"),configured:true,demoMode:false,cached:$cached,fetchedAt:$fetchedAt,issues:($issues[0] // [])}'
+}
+
+demo_list() {
+  local limit=${1:-50} normalized sliced
+  normalized=$(tmpfile)
+  normalize_list "$FIXTURE_DIR/issues.json" "$normalized" || die fixture-error "invalid demo issue fixture"
+  sliced=$(tmpfile)
+  jq -c --argjson limit "$limit" '.[0:$limit]' "$normalized" >"$sliced" || die fixture-error "invalid demo issue fixture"
+  emit_list "$sliced" ready false | jq -c '.demoMode = true'
+}
+
+cache_list() {
+  local normalized=$1 tmp
+  mkdir -p -- "$CACHE_DIR" 2>/dev/null || return 1
+  chmod 700 -- "$CACHE_DIR" 2>/dev/null || :
+  tmp=$(tmpfile); jq -c . "$normalized" >"$tmp" 2>/dev/null && chmod 600 "$tmp" && mv -f -- "$tmp" "$LIST_CACHE"
+}
+
+fixture_detail() {
+  local id=$1 f
+  f="$FIXTURE_DIR/issue-$id.json"
+  [ -f "$f" ] || return 1
+  jq -c . "$f" 2>/dev/null
+}
+
+normalize_detail() {
+  local issue=$1 event=$2
+  jq -cn --slurpfile i "$issue" --slurpfile e "$event" '
+    def text: (if . == null then "" elif type == "string" then (gsub("[[:cntrl:]]"; "") | gsub("\\u007f"; "") | .[0:2000]) else tostring end);
+    def safe: if type == "string" then (gsub("[[:cntrl:]]"; "") | gsub("\\u007f"; "") | .[0:1000]) elif type == "array" then map(safe)[0:100] elif type == "object" then with_entries(.value |= safe) else . end;
+    def frame: {filename:((.filename // .absPath // .module // "")|text), function:((.function // .name // "")|text), module:((.module // "")|text), line:(.lineNo // .line // null), column:(.colNo // .column // null), context:((.context_line // .context // "")|text), inApp:(.inApp // .in_app // false), vars:(if (.vars|type)=="object" then (.vars|safe) else {} end)};
+    def issue: ($i[0] | (
+      def num: (if . == null then 0 elif type=="number" then . elif (tonumber? // null)!=null then tonumber else 0 end);
+      def boolean: (if . == true then true else false end);
+      def seen: (if has("hasSeen") then (.hasSeen|boolean) elif has("has_seen") then (.has_seen|boolean) else false end);
+      def inbox: (if has("inInbox") then (.inInbox|boolean) elif has("in_inbox") then (.in_inbox|boolean) else (.inbox != null) end);
+      {id:(.id|text), shortId:((.shortId // .short_id // .id)|text), title:((.title // .metadata.value // .culprit // "Untitled")|text), culprit:(.culprit|text), project:((.project.slug // .project.name // .project // "")|text), environment:((.environment // .matchingEventEnvironment)|text), level:((.level // "error")|text), priority:((.priority // "")|tostring|ascii_downcase|if .=="high" or .=="medium" or .=="low" then . else "" end), hasSeen:seen, inInbox:inbox, status:((.status // "unresolved")|text), substatus:((.substatus // .statusDetails.substatus // "")|text), isUnhandled:(.isUnhandled // .is_unhandled // false), isRegression:((.isRegression // .is_regression // (.substatus == "regressed")) == true), count:(.count|num), userCount:((.userCount // .user_count)|num), firstSeen:((.firstSeen // .first_seen)|text), lastSeen:((.lastSeen // .last_seen)|text), assignedTo:(if .assignedTo == null then "" elif (.assignedTo|type)=="object" then ((.assignedTo.name // .assignedTo.email // .assignedTo.id)|text) else (.assignedTo|text) end), permalink:((.permalink // .web_url // "")|text)}));
+    ($e[0].entries // [] | map(select(.type == "exception" or .type == "stacktrace")) | .[0].data.values[0].stacktrace.frames // []) as $frames |
+    {schemaVersion:1,state:"ready",issue:issue,metadata:(($i[0].metadata // {}) | if type=="object" then with_entries(.value |= text) else {} end),tags:(($e[0].tags // $i[0].tags // []) | if type=="array" then map(if type=="array" then {key:(.[0]|text),value:(.[1]|text)} elif type=="object" then {key:(.key // .name // ""|text),value:(.value // ""|text)} else empty end) else [] end),stacktrace:($frames|map(frame)),breadcrumbs:(($e[0].breadcrumbs.values // []) | if type=="array" then map({timestamp:(.timestamp|text),category:(.category|text),message:(.message // .data // ""|text),level:(.level|text)}) else [] end)}
+  '
+}
+
+config_or_die() { load_config || die not-configured "Trace is not configured"; }
+validate_timeouts() {
+  [[ ${TRACE_CONNECT_TIMEOUT:-10} =~ ^[0-9]+$ ]] && [ "${TRACE_CONNECT_TIMEOUT:-10}" -ge 1 ] && [ "${TRACE_CONNECT_TIMEOUT:-10}" -le 120 ] || die invalid-input "invalid connect timeout"
+  [[ ${TRACE_MAX_TIME:-30} =~ ^[0-9]+$ ]] && [ "${TRACE_MAX_TIME:-30}" -ge 1 ] && [ "${TRACE_MAX_TIME:-30}" -le 120 ] || die invalid-input "invalid request timeout"
+}
+issue_arg() { valid_identifier "$1" || die invalid-input "invalid issue identifier"; }
+valid_filter_csv() {
+  local value=$1 item count=0
+  [ -z "$value" ] && return 0
+  IFS=',' read -r -a filter_items <<<"$value"
+  for item in "${filter_items[@]}"; do
+    item=$(printf '%s' "$item" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')
+    [ -n "$item" ] || die invalid-input "environment names must not be empty"
+    [ "${#item}" -le 128 ] || die invalid-input "environment name is too long"
+    [[ "$item" != *$'\n'* && "$item" != *$'\r'* ]] || die invalid-input "invalid environment name"
+    count=$((count + 1)); [ "$count" -le 20 ] || die invalid-input "too many environments"
+  done
+}
+
+command_configure() {
+  local base="" org="" projects="" environments="production" token="" token_stdin=0 arg
+  # Service.qml sends setup as one JSON line. A raw token is still accepted
+  # with --token-stdin, but tokens are never accepted as arguments.
+  if { [ "$#" -eq 0 ] || { [ "$#" -eq 1 ] && [ "${1:-}" = "--token-stdin" ]; }; } && [ ! -t 0 ]; then
+    local setup_line=""
+    IFS= read -r setup_line || :
+    if [ -n "$setup_line" ] && jq -e 'type == "object"' >/dev/null 2>&1 <<<"$setup_line"; then
+      base=$(jq -r '.baseUrl // .base_url // empty' <<<"$setup_line")
+      org=$(jq -r '.organization // .org // empty' <<<"$setup_line")
+      projects=$(jq -r 'if (.projects|type)=="array" then (.projects|map(tostring)|join(",")) elif .projects == null then "" else (.projects|tostring) end' <<<"$setup_line")
+      environments=$(jq -r 'if has("environments") then (if (.environments|type)=="array" then (.environments|map(tostring)|join(",")) elif .environments == null then "" else (.environments|tostring) end) else "production" end' <<<"$setup_line")
+      token=$(jq -r '.token // empty' <<<"$setup_line")
+      token_stdin=1
+    fi
+  fi
+  while [ "$#" -gt 0 ]; do
+    arg=$1; shift
+    case "$arg" in
+      --base-url) [ "$#" -gt 0 ] || die invalid-input "missing base URL"; base=$1; shift;;
+      --organization|--org) [ "$#" -gt 0 ] || die invalid-input "missing organization"; org=$1; shift;;
+      --projects) [ "$#" -gt 0 ] || die invalid-input "missing projects"; projects=$1; shift;;
+      --environments|--environment) [ "$#" -gt 0 ] || die invalid-input "missing environments"; environments=$1; shift;;
+      --token-stdin) token_stdin=1;;
+      --demo) DEMO=1;;
+      -*) die invalid-input "unknown configure option";;
+      *)
+        if [ -z "$base" ]; then base=$arg
+        elif [ -z "$org" ]; then org=$arg
+        elif [ -z "$projects" ]; then projects=$arg
+        elif [ "$environments" = "production" ]; then environments=$arg
+        else die invalid-input "too many configure arguments"
+        fi;;
+    esac
+  done
+  [ -n "$base" ] && valid_url "$base" || die invalid-input "base URL must use HTTPS (or localhost HTTP)"
+  valid_identifier "$org" || die invalid-input "invalid organization"
+  if [ -n "$projects" ]; then
+    local p
+    IFS=',' read -r -a p <<<"$projects"
+    for project in "${p[@]}"; do
+      project=$(printf '%s' "$project" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')
+      valid_identifier "$project" || die invalid-input "invalid project"
+    done
+  fi
+  valid_filter_csv "$environments"
+  if [ "$token_stdin" -eq 1 ] && [ -z "$token" ]; then
+    IFS= read -r -s token || :
+  elif [ "$token_stdin" -ne 1 ]; then
+    # A token is intentionally never accepted as a command-line argument.
+    die invalid-input "provide the API token with --token-stdin"
+  fi
+  [ -n "$token" ] || die invalid-input "empty API token"
+  command -v secret-tool >/dev/null 2>&1 || die dependency-missing "secret-tool is required to store the token"
+  write_config "$(clean_url "$base")" "$org" "$projects" "$environments"
+  BASE_URL=$(clean_url "$base") ORG="$org"
+  printf '%s' "$token" | secret-tool store --label='Trace Sentry API token' service trace base-url "$BASE_URL" organization "$ORG" >/dev/null 2>/dev/null || die config-error "could not store token in GNOME Keyring"
+  # The cache is intentionally not portable across organizations, project
+  # scopes, or environment scopes. Never let a new connection inherit stale
+  # issue data from the previous one.
+  rm -f -- "$LIST_CACHE" 2>/dev/null || die config-error "could not clear the previous issue cache"
+  jq -cn '{schemaVersion:1,state:"ready",configured:true}'
+}
+
+command_status() {
+  if demo_enabled; then jq -cn '{schemaVersion:1,state:"ready",configured:true,demo:true}'; return; fi
+  if config_exists && load_config; then
+    if secret_lookup >/dev/null 2>&1; then jq -cn --arg base "$BASE_URL" --arg organization "$ORG" '{schemaVersion:1,state:"ready",configured:true,baseUrl:$base,organization:$organization}'
+    else jq -cn --arg base "$BASE_URL" --arg organization "$ORG" '{schemaVersion:1,state:"setup",configured:false,baseUrl:$base,organization:$organization,message:"Sentry token is not available"}'; fi
+  else jq -cn '{schemaVersion:1,state:"unconfigured",configured:false}'; fi
+}
+
+command_list() {
+  local limit=${1:-50} normalized url projects_q="" environments_q="" project environment
+  [[ "$limit" =~ ^[0-9]+$ ]] && [ "$limit" -ge 10 ] && [ "$limit" -le 100 ] || die invalid-input "issue limit must be 10-100"
+  if demo_enabled; then demo_list "$limit"; return; fi
+  config_or_die; validate_timeouts
+  urlencode() { jq -nr --arg value "$1" '$value|@uri'; }
+  if [ -n "$PROJECTS" ]; then IFS=',' read -r -a projects_arr <<<"$PROJECTS"; for project in "${projects_arr[@]}"; do projects_q="$projects_q&project=$(urlencode "$project")"; done; fi
+  if [ -n "${ENVIRONMENTS:-}" ]; then IFS=',' read -r -a environments_arr <<<"$ENVIRONMENTS"; for environment in "${environments_arr[@]}"; do environments_q="$environments_q&environment=$(urlencode "$environment")"; done; fi
+  url="$BASE_URL/api/0/organizations/$ORG/issues/?query=is%3Aunresolved&limit=$limit&sort=date&expand=inbox$projects_q$environments_q"
+  curl_api GET "$url" || { if [ -f "$LIST_CACHE" ]; then emit_list "$LIST_CACHE" stale true; else die network-error "$API_ERROR"; fi; return; }
+  normalized=$(tmpfile); normalize_list "$API_BODY" "$normalized" || die api-error "invalid Sentry issue response"
+  cache_list "$normalized" || :
+  emit_list "$normalized" ready false
+}
+
+command_detail() {
+  local id=$1 issue event result
+  issue_arg "$id"
+  if demo_enabled; then
+    issue=$(fixture_detail "$id") || die not-found "demo issue not found"
+    event=$(tmpfile); printf '%s' "$issue" >"$event"
+    result=$(normalize_detail "$event" "$event") || die fixture-error "invalid demo detail fixture"
+    printf '%s\n' "$result"; return
+  fi
+  config_or_die; validate_timeouts
+  curl_api GET "$BASE_URL/api/0/organizations/$ORG/issues/$id/" || die network-error "$API_ERROR"
+  issue=$(tmpfile); cp -- "$API_BODY" "$issue"
+  event=$(tmpfile)
+  if curl_api GET "$BASE_URL/api/0/organizations/$ORG/issues/$id/events/latest/"; then cp -- "$API_BODY" "$event"; else printf '{}\n' >"$event"; fi
+  normalize_detail "$issue" "$event" || die api-error "invalid Sentry detail response"
+}
+
+command_action() {
+  local action=$1 id=$2 payload result issue user
+  issue_arg "$id"
+  if [ "$action" = ignore ]; then
+    [[ ${3:-} =~ ^[0-9]+$ ]] && [ "${3:-}" -ge 1 ] && [ "${3:-}" -le 43200 ] || die invalid-input "ignore duration must be 1-43200 minutes"
+  fi
+  if demo_enabled; then jq -cn --arg action "$action" --arg id "$id" '{schemaVersion:1,state:"ready",action:$action,issueId:$id}'; return; fi
+  config_or_die; validate_timeouts
+  case "$action" in
+    resolve) payload='{"status":"resolved"}';;
+    review) payload='{"hasSeen":true,"inbox":true}';;
+    ignore) local duration=${3:-}; [[ "$duration" =~ ^[0-9]+$ ]] && [ "$duration" -ge 1 ] && [ "$duration" -le 43200 ] || die invalid-input "ignore duration must be 1-43200 minutes"; payload=$(jq -cn --argjson d "$duration" '{status:"ignored",statusDetails:{ignoreDuration:$d}}');;
+    assign)
+      curl_api GET "$BASE_URL/api/0/users/me/" || die network-error "could not determine current Sentry user"
+      user=$(jq -er '.id // empty' "$API_BODY" 2>/dev/null) || die api-error "Sentry user response had no id"
+      valid_identifier "$user" || die api-error "invalid Sentry user id"
+      payload=$(jq -cn --arg user "$user" '{assignedTo:$user}');;
+    *) die invalid-input "unsupported action";;
+  esac
+  curl_api PUT "$BASE_URL/api/0/organizations/$ORG/issues/$id/" "$payload" || die network-error "$API_ERROR"
+  if jq -e . "$API_BODY" >/dev/null 2>&1; then issue=$(normalize_issue <"$API_BODY"); else issue=$(jq -cn --arg id "$id" '{id:$id}'); fi
+  jq -cn --arg action "$action" --argjson issue "$issue" '{schemaVersion:1,state:"ready",action:$action,issue:$issue}'
+}
+
+command_clear_token() {
+  config_or_die
+  command -v secret-tool >/dev/null 2>&1 || die dependency-missing "secret-tool is required"
+  secret-tool clear service trace base-url "$BASE_URL" organization "$ORG" >/dev/null 2>/dev/null || die keyring-error "could not clear token"
+  rm -f -- "$CONFIG_FILE" 2>/dev/null || die config-error "could not clear local configuration"
+  rm -f -- "$LIST_CACHE" 2>/dev/null || die config-error "could not clear cached issues"
+  jq -cn '{schemaVersion:1,state:"ready",action:"clear-token"}'
+}
+
+command_notify() {
+  local id=${1:-} issues f input identity title permalink body
+  if [ ! -t 0 ]; then
+    IFS= read -r input || input=""
+    if [ -n "$input" ] && jq -e 'type == "object"' >/dev/null 2>&1 <<<"$input"; then
+      identity=$(jq -nr --argjson input "$input" --arg fallback "$id" '($input.identity // $input.id // $fallback // "") | tostring | gsub("[[:cntrl:]]";"") | .[0:256]')
+      title=$(jq -r '.title // "Trace regression"' <<<"$input")
+      permalink=$(jq -r '.permalink // empty' <<<"$input")
+      [[ "$identity" =~ ^[A-Za-z0-9_.:@/-]{1,256}$ ]] || die invalid-input "invalid notification identity"
+      title=$(jq -nr --arg v "$title" '$v|gsub("[[:cntrl:]]";"")|.[0:200]')
+      body=$(jq -nr --arg v "$permalink" '$v|gsub("[[:cntrl:]]";"")|.[0:500]')
+      if command -v notify-send >/dev/null 2>&1; then notify-send --app-name Trace "$title" "$body" >/dev/null 2>/dev/null || :; fi
+      jq -cn --arg identity "$identity" --arg title "$title" '{schemaVersion:1,state:"ready",action:"notify",notification:{identity:$identity,title:$title}}'
+      return
+    fi
+  fi
+  if [ -n "$id" ]; then issue_arg "$id"; command_detail "$id" | jq -c '{schemaVersion:1,state:.state,notification:(.issue // {})}'; return; fi
+  if demo_enabled; then
+    f=$(tmpfile); normalize_list "$FIXTURE_DIR/issues.json" "$f" || die fixture-error "invalid demo issue fixture"
+    jq -cn --slurpfile i "$f" '{schemaVersion:1,state:"ready",notification:(($i[0] // []) | map(select(.isRegression == true))[0] // {})}'
+  else
+    f=$(tmpfile); command_list >"$f" || die network-error "could not list issues"
+    jq -cn --slurpfile i "$f" '{schemaVersion:1,state:"ready",notification:(($i[0].issues // []) | map(select(.isRegression == true))[0] // {})}'
+  fi
+}
+
+DEMO=0
+if [ "${1:-}" = --demo ]; then DEMO=1; shift; fi
+COMMAND=${1:-status}; shift || :
+case "$COMMAND" in
+  status) command_status "$@";;
+  configure) command_configure "$@";;
+  list) [ "$#" -le 1 ] || die invalid-input "list takes at most one issue limit"; command_list "${1:-50}";;
+  detail) [ "$#" -eq 1 ] || die invalid-input "detail requires an issue id"; command_detail "$1";;
+  resolve|assign|review) [ "$#" -eq 1 ] || die invalid-input "$COMMAND requires an issue id"; command_action "$COMMAND" "$1";;
+  ignore) [ "$#" -ge 1 ] && [ "$#" -le 2 ] || die invalid-input "ignore requires issue id and duration"; command_action ignore "$1" "${2:-}";;
+  clear-token) [ "$#" -eq 0 ] || die invalid-input "clear-token takes no arguments"; command_clear_token;;
+  notify) [ "$#" -le 1 ] || die invalid-input "notify takes zero or one issue id"; command_notify "${1:-}";;
+  --help|-h) jq -cn '{schemaVersion:1,state:"ready",commands:["status","configure","list","detail","resolve","assign","review","ignore","clear-token","notify"]}' ;;
+  *) die invalid-input "unknown command";;
+esac
