@@ -17,4 +17,4 @@ jobs:
       - name: Source tests
         run: make test-shell
       - name: Shell syntax
-        run: bash -n install.sh scripts/*.sh
+        run: bash -n scripts/*.sh

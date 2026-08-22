@@ -16,8 +16,7 @@ and hand deep investigation back to Sentry.
 - Never delete Sentry data. Resolve, assign, and timed-ignore are reversible.
 - Demo mode must exercise the same model and UI paths as live data.
 - The quiet state is quiet: no vanity counters or noisy notifications.
-- Runtime code must not edit the user's broader Omarchy configuration; only
-  the explicit development installer may add or remove Trace itself.
+- Runtime code must not edit the user's broader Omarchy configuration.
 
 ## Architecture contract
 

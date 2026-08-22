@@ -33,13 +33,10 @@ omarchy plugin add https://github.com/wbarakat/omarchy-trace.git --enable
 For a local checkout or development install:
 
 ```bash
-./install.sh                 # validates, symlinks, and restarts the shell
-./install.sh --no-restart   # useful while iterating on source
+omarchy plugin add "$PWD" --enable
 ```
 
-The script backs up an existing `wbarakat.trace` install outside the plugin
-directory before replacing it. It never edits Hyprland, Omarchy themes, or
-other user configuration.
+Trace never edits Hyprland, Omarchy themes, or other user configuration.
 
 ## Requirements
 
