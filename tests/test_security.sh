@@ -51,12 +51,12 @@ jq -e '.projects == ["web", "api"]' "$JSON_CONFIG/trace/config.json" >/dev/null
 jq -e '.environments == ["production", "us east"]' "$JSON_CONFIG/trace/config.json" >/dev/null
 
 # URL filters are encoded and repeated rather than interpolated raw.
-rg -q 'project=\$\(urlencode "\$project"\)' "$ROOT/scripts/trace-api.sh"
-rg -q 'environment=\$\(urlencode "\$environment"\)' "$ROOT/scripts/trace-api.sh"
-rg -q 'expand=inbox' "$ROOT/scripts/trace-api.sh"
-rg -q 'review\) payload=.*hasSeen.*inbox' "$ROOT/scripts/trace-api.sh"
+grep -qE 'project=\$\(urlencode "\$project"\)' "$ROOT/scripts/trace-api.sh"
+grep -qE 'environment=\$\(urlencode "\$environment"\)' "$ROOT/scripts/trace-api.sh"
+grep -q 'expand=inbox' "$ROOT/scripts/trace-api.sh"
+grep -qE 'review\) payload=.*hasSeen.*inbox' "$ROOT/scripts/trace-api.sh"
 
-! rg -n --hidden --glob '!*.git*' 'Bearer[[:space:]]+[A-Za-z0-9._-]{20,}' "$ROOT/scripts" "$ROOT/fixtures"
+! grep -R -nE 'Bearer[[:space:]]+[A-Za-z0-9._-]{20,}' "$ROOT/scripts" "$ROOT/fixtures"
 
 bad=$(XDG_CONFIG_HOME="$CONFIG" XDG_CACHE_HOME="$CACHE" TRACE_DEMO=1 "$API" detail '../secret' || true)
 printf '%s\n' "$bad" | jq -e '.state == "error" and .error.code == "invalid-input"' >/dev/null
