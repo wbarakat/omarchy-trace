@@ -24,6 +24,8 @@ Item {
   readonly property int maxHelperOutputChars: 1048576
   readonly property int maxHelperErrorChars: 16384
   readonly property int maxAgentOutputChars: 4096
+  readonly property int helperDeadlineSeconds: 90
+  readonly property int maxQueuedOperations: 16
 
   property var settings: defaultSettingValues
   readonly property var defaultSettingValues: ({
@@ -76,6 +78,7 @@ Item {
   property string _agentStdout: ""
   property bool _outputOverflow: false
   property bool _errorOverflow: false
+  property bool _helperTimedOut: false
 
   function setting(name, fallback) {
     var value = settings ? settings[name] : undefined
@@ -148,7 +151,11 @@ Item {
     }
   }
 
-  function refresh() {
+  function refresh(recurring) {
+    // A poll is disposable. Never let a slow helper turn the recurring timer
+    // into an unbounded backlog; a later tick will fetch authoritative state.
+    if (queueContains("list")) return
+    if (recurring === true && apiProcess.running) return
     enqueue("list", [String(intSetting("maxIssues", 50, 10, 100))], "", demoMode)
   }
 
@@ -298,10 +305,23 @@ Item {
 
   Component.onCompleted: enqueue("status", [])
 
+  function queueContains(operation) {
+    for (var i = 0; i < _queue.length; i++)
+      if (_queue[i].operation === operation) return true
+    return false
+  }
+
   function enqueue(operation, args, payload, demo) {
-    var entry = { operation: String(operation), args: args || [], payload: payload || "", demo: demo === true }
+    operation = String(operation)
+    if (operation === "list" && queueContains("list")) return false
+    if (_queue.length >= maxQueuedOperations) {
+      message = "Trace is busy; wait for the current work to finish."
+      return false
+    }
+    var entry = { operation: operation, args: args || [], payload: payload || "", demo: demo === true }
     _queue = _queue.concat([entry])
     pump()
+    return true
   }
 
   function pump() {
@@ -313,7 +333,9 @@ Item {
     _stderr = ""
     _outputOverflow = false
     _errorOverflow = false
-    var command = [helperPath, "--chunk-output"]
+    _helperTimedOut = false
+    var command = ["timeout", "--signal=TERM", "--kill-after=5s",
+      helperDeadlineSeconds + "s", helperPath, "--chunk-output"]
     if (entry.demo) command.push("--demo")
     command.push(entry.operation)
     for (var i = 0; i < entry.args.length; i++) command.push(String(entry.args[i]))
@@ -330,7 +352,19 @@ Item {
     interval: root.intSetting("refreshIntervalSec", 120, 30, 3600) * 1000
     repeat: true
     running: root.configured || root.demoMode
-    onTriggered: root.refresh()
+    onTriggered: root.refresh(true)
+  }
+
+  Timer {
+    id: helperWatchdog
+    interval: (root.helperDeadlineSeconds + 5) * 1000
+    repeat: false
+    running: apiProcess.running
+    onTriggered: {
+      root._helperTimedOut = true
+      root._queue = []
+      apiProcess.running = false
+    }
   }
 
   Process {
@@ -381,6 +415,17 @@ Item {
       operation = root._currentOperation
       root.loading = operation === "list" ? false : root.loading
       root.detailLoading = operation === "detail" ? false : root.detailLoading
+      if (root._helperTimedOut || exitCode === 124) {
+        root.loading = false
+        root.detailLoading = false
+        root.state = "error"
+        root.ready = false
+        root.message = "Trace helper timed out; queued work was discarded."
+        root._queue = []
+        root._inputPayload = ""
+        root._helperTimedOut = false
+        return
+      }
       if (root._outputOverflow || root._errorOverflow) {
         root.loading = false
         root.detailLoading = false

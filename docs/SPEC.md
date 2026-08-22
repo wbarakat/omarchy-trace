@@ -92,7 +92,10 @@ round trip.
 Requests must set timeouts, honor non-2xx responses, redact secrets from error
 text, validate URL/organization/issue identifiers, and never evaluate remote
 data as shell or rich text. Curl rejects responses over 4 MiB, and the shell
-stops incremental collection at 1 MiB before parsing helper output.
+stops incremental collection at 1 MiB before parsing helper output. Provider
+arrays are sliced before normalization, every Sentry helper invocation has a
+90-second deadline, recurring refresh work is coalesced, and the remaining
+queue is capped.
 
 ## Visual direction
 

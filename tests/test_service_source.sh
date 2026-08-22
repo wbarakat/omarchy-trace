@@ -26,5 +26,11 @@ grep -q '_agentPrompt = JSON.stringify' Service.qml || fail "handoff payload mus
 grep -q 'write(root._agentPrompt' Service.qml || fail "handoff payload must be written over stdin"
 grep -q 'maxHelperOutputChars' Service.qml || fail "helper output must have a hard collection limit"
 grep -q 'stdout: SplitParser' Service.qml || fail "helper output must be collected incrementally"
-grep -q '\[helperPath, "--chunk-output"\]' Service.qml || fail "helper lines must be chunked before shell collection"
+grep -q 'helperPath, "--chunk-output"' Service.qml || fail "helper lines must be chunked before shell collection"
+grep -q 'helperDeadlineSeconds: 90' Service.qml || fail "helper processes need a hard deadline"
+grep -q 'helperDeadlineSeconds + "s", helperPath' Service.qml || fail "the OS must enforce the helper deadline"
+grep -q 'id: helperWatchdog' Service.qml || fail "the shell must watchdog the deadline wrapper"
+grep -q 'recurring === true && apiProcess.running' Service.qml || fail "recurring refreshes must be dropped while work is active"
+grep -q 'operation === "list" && queueContains("list")' Service.qml || fail "pending refreshes must be coalesced"
+grep -q '_queue.length >= maxQueuedOperations' Service.qml || fail "the service queue must have a hard bound"
 printf 'test_service_source.sh ok\n'

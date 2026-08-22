@@ -38,6 +38,7 @@ if grep -nE 'bash[" ]*,[" ]*-c|sh[" ]*,[" ]*-c|\| *bash|\| *sh' Service.qml; the
   fail "Service must not evaluate remote data as shell code"
 fi
 grep -q -- '--config - --max-filesize' scripts/trace-api.sh || fail "Sentry requests must stream credentials and cap responses"
+grep -q '| .\[0:\$limit\]' scripts/trace-api.sh || fail "provider lists must be sliced before normalization"
 if grep -qE -- '--config[[:space:]]+"?\$cfg' scripts/trace-api.sh; then
   fail "curl credentials must never be written to a config file"
 fi

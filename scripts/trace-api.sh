@@ -159,8 +159,9 @@ normalize_issue() {
 }
 
 normalize_list() {
-  local source=$1 out=$2
-  jq -c --argjson source "${3:-false}" '
+  local source=$1 out=$2 limit=${3:-100}
+  [[ "$limit" =~ ^[0-9]+$ ]] && [ "$limit" -ge 1 ] && [ "$limit" -le 100 ] || return 1
+  jq -c --argjson limit "$limit" '
     def issue: (
       def text: (if . == null then "" elif type == "string" then (gsub("[[:cntrl:]]"; "") | gsub("\\u007f"; "") | .[0:1000]) else tostring end);
       def number: (if . == null then 0 elif type == "number" then . elif (tonumber? // null) != null then tonumber else 0 end);
@@ -169,7 +170,9 @@ normalize_list() {
       def inbox: (if has("inInbox") then (.inInbox|boolean) elif has("in_inbox") then (.in_inbox|boolean) else (.inbox != null) end);
       {id:(.id|text), shortId:((.shortId // .short_id // .id)|text), title:((.title // .metadata.value // .culprit // "Untitled")|text), culprit:(.culprit|text), project:((.project.slug // .project.name // .project // "")|text), environment:((.environment // .matchingEventEnvironment)|text), level:((.level // "error")|text), priority:((.priority // "")|tostring|ascii_downcase|if .=="high" or .=="medium" or .=="low" then . else "" end), hasSeen:seen, inInbox:inbox, status:((.status // "unresolved")|text), substatus:((.substatus // .statusDetails.substatus // "")|text), isUnhandled:((.isUnhandled // .is_unhandled // false)|boolean), isRegression:((.isRegression // .is_regression // (.substatus == "regressed"))|boolean), count:((.count)|number), userCount:((.userCount // .user_count)|number), firstSeen:((.firstSeen // .first_seen)|text), lastSeen:((.lastSeen // .last_seen)|text), assignedTo:(if .assignedTo == null then "" elif (.assignedTo|type)=="object" then ((.assignedTo.name // .assignedTo.email // .assignedTo.id)|text) else (.assignedTo|text) end), permalink:((.permalink // .web_url // "")|text)}
     );
-    (if type == "array" then . elif (.issues|type)=="array" then .issues else [] end) | map(issue)
+    (if type == "array" then . elif (.issues|type)=="array" then .issues else [] end)
+    | .[0:$limit]
+    | map(issue)
   ' "$source" >"$out" 2>/dev/null || return 1
 }
 
@@ -182,12 +185,10 @@ emit_list() {
 }
 
 demo_list() {
-  local limit=${1:-50} normalized sliced
+  local limit=${1:-50} normalized
   normalized=$(tmpfile)
-  normalize_list "$FIXTURE_DIR/issues.json" "$normalized" || die fixture-error "invalid demo issue fixture"
-  sliced=$(tmpfile)
-  jq -c --argjson limit "$limit" '.[0:$limit]' "$normalized" >"$sliced" || die fixture-error "invalid demo issue fixture"
-  emit_list "$sliced" ready false | jq -c '.demoMode = true'
+  normalize_list "$FIXTURE_DIR/issues.json" "$normalized" "$limit" || die fixture-error "invalid demo issue fixture"
+  emit_list "$normalized" ready false | jq -c '.demoMode = true'
 }
 
 cache_list() {
@@ -322,7 +323,7 @@ command_list() {
   if [ -n "${ENVIRONMENTS:-}" ]; then IFS=',' read -r -a environments_arr <<<"$ENVIRONMENTS"; for environment in "${environments_arr[@]}"; do environments_q="$environments_q&environment=$(urlencode "$environment")"; done; fi
   url="$BASE_URL/api/0/organizations/$ORG/issues/?query=is%3Aunresolved&limit=$limit&sort=date&expand=inbox$projects_q$environments_q"
   curl_api GET "$url" || { if [ -f "$LIST_CACHE" ]; then emit_list "$LIST_CACHE" stale true; else die network-error "$API_ERROR"; fi; return; }
-  normalized=$(tmpfile); normalize_list "$API_BODY" "$normalized" || die api-error "invalid Sentry issue response"
+  normalized=$(tmpfile); normalize_list "$API_BODY" "$normalized" "$limit" || die api-error "invalid Sentry issue response"
   cache_list "$normalized" || :
   emit_list "$normalized" ready false
 }

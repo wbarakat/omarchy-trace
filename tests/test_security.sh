@@ -73,6 +73,10 @@ done
 [ -n "$output" ]
 if [ "${TRACE_TEST_OVERSIZE:-0}" = 1 ]; then
   head -c 65537 /dev/zero | tr '\0' x >"$output"
+elif [ "${TRACE_TEST_MANY_ISSUES:-0}" = 1 ]; then
+  # A compact provider array stays well under the wire cap but would expand
+  # dramatically if every sparse item were normalized before slicing.
+  jq -cn '[range(0;1000) | {id:(.|tostring)}]' >"$output"
 else
   printf '[]\n' >"$output"
 fi
@@ -96,6 +100,11 @@ if grep -nE 'jq .*Bearer|--arg[^[:cntrl:]]*\$token' "$ROOT/scripts/trace-api.sh"
   printf 'token must not enter formatter process arguments\n' >&2
   exit 1
 fi
+
+many_output=$(PATH="$BIN:$PATH" XDG_CONFIG_HOME="$CURL_CONFIG" XDG_CACHE_HOME="$CURL_CACHE" \
+  TRACE_CURL_BIN="$BIN/curl" TRACE_MAX_RESPONSE_BYTES=65536 TRACE_TEST_CURL_ARGS="$TMP/curl-args" \
+  TRACE_TEST_MANY_ISSUES=1 "$API" list 10)
+jq -e '(.issues | length) == 10 and .issues[0].id == "0" and .issues[9].id == "9"' <<<"$many_output" >/dev/null
 
 oversize_output=$(PATH="$BIN:$PATH" XDG_CONFIG_HOME="$CURL_CONFIG" XDG_CACHE_HOME="$TMP/no-cache" \
   TRACE_CURL_BIN="$BIN/curl" TRACE_MAX_RESPONSE_BYTES=65536 TRACE_TEST_CURL_ARGS="$TMP/curl-args" \

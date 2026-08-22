@@ -128,6 +128,11 @@ will refuse to parse it. Agent handoff sends the bounded diagnostic packet over
 a private, one-time FIFO in the user's runtime directory; only a generic
 instruction and opaque FIFO path appear in process arguments.
 
+Provider issue arrays are sliced to the configured 10–100 issue window before
+field normalization. Every Sentry helper invocation has a 90-second process
+deadline, recurring refreshes are coalesced while work is active, and the
+remaining operation queue is capped rather than allowed to grow without bound.
+
 Trace is a thin inbox, not a replacement for Sentry. One connection represents
 one Sentry organization; switching organizations deliberately means
 reconnecting. Search and the project picker operate on the current bounded
