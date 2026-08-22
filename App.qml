@@ -101,6 +101,7 @@ Item {
     if (action === "resolve") return "Resolve this issue?"
     if (action === "assign") return "Assign this issue to you?"
     if (action === "review") return "Mark this issue reviewed?"
+    if (action === "explain") return "Explain this issue with your default agent?"
     if (action === "ignore60") return "Ignore this issue for one hour?"
     if (action === "ignore1440") return "Ignore this issue for one day?"
     if (action === "ignore10080") return "Ignore this issue for one week?"
@@ -111,6 +112,7 @@ Item {
     if (action === "resolve") return "Moves it out of Trace’s unresolved inbox. It remains in Sentry as resolved."
     if (action === "assign") return "Keeps it in the inbox and assigns it to your Sentry account."
     if (action === "review") return "Keeps it unresolved, but removes its unreviewed attention state for you."
+    if (action === "explain") return "Sends issue metadata, tags, stack trace, breadcrumbs, and its URL to your configured agent. The agent may transmit this context to its provider. Sentry is not changed."
     if (action === "ignore60") return "Moves it out of the inbox for one hour, then Sentry can reactivate it."
     if (action === "ignore1440") return "Moves it out of the inbox for one day, then Sentry can reactivate it."
     if (action === "ignore10080") return "Moves it out of the inbox for one week, then Sentry can reactivate it."
@@ -123,6 +125,7 @@ Item {
     if (action === "resolve" && issue) service.resolveIssue(issue)
     else if (action === "assign" && issue) service.assignIssue(issue)
     else if (action === "review" && issue && typeof service.reviewIssue === "function") service.reviewIssue(issue)
+    else if (action === "explain" && issue && typeof service.explainIssue === "function") service.explainIssue(issue, service.selectedDetail)
     else if (action.indexOf("ignore") === 0 && issue) service.ignoreIssue(issue, Number(action.slice(6)))
     else if (action === "disconnect") service.clearCredentials()
   }
@@ -180,6 +183,7 @@ Item {
       Shortcut { sequence: "E"; enabled: root.commandShortcutsEnabled; onActivated: root.confirm("resolve") }
       Shortcut { sequence: "A"; enabled: root.commandShortcutsEnabled; onActivated: root.confirm("assign") }
       Shortcut { sequence: "X"; enabled: root.commandShortcutsEnabled; onActivated: root.confirm("review") }
+      Shortcut { sequence: "I"; enabled: root.commandShortcutsEnabled; onActivated: root.confirm("explain") }
       Shortcut { sequence: "Z"; enabled: root.commandShortcutsEnabled; onActivated: root.openIgnoreMenu() }
       Shortcut { sequence: "P"; enabled: root.commandShortcutsEnabled; onActivated: root.openProjectMenu() }
       Shortcut { sequence: "O"; enabled: root.commandShortcutsEnabled && !!root.selectedIssue; onActivated: root.service.openIssue(root.selectedIssue) }
@@ -224,7 +228,7 @@ Item {
           }
         }
         IssueList { id: list; anchors.top: controls.bottom; anchors.bottom: parent.bottom; anchors.left: parent.left; width: root.compact ? parent.width : Math.round(parent.width * .43); visible: !root.compact || root.narrowView === "list"; issues: root.issues; selectedIssue: root.selectedIssue; loading: root.service && root.service.loading; query: root.query; onSelected: function(index) { root.select(index, false) }; onActivated: function(issue) { root.openSelected() } }
-        IssueDetail { id: detail; anchors.top: controls.bottom; anchors.bottom: parent.bottom; anchors.left: root.compact ? parent.left : list.right; anchors.leftMargin: root.compact ? 0 : Style.space(5); anchors.right: parent.right; visible: !root.compact || root.narrowView === "detail"; issue: root.selectedIssue; detail: root.service ? root.service.selectedDetail : null; loading: root.service && root.service.detailLoading; onResolveRequested: root.confirm("resolve"); onAssignRequested: root.confirm("assign"); onReviewRequested: root.confirm("review"); onIgnoreRequested: root.openIgnoreMenu(); onOpenRequested: if (root.service && root.service.selectedIssue) root.service.openIssue(root.service.selectedIssue); onCopyRequested: if (root.service && root.service.selectedIssue) root.service.copyIssue(root.service.selectedIssue) }
+        IssueDetail { id: detail; anchors.top: controls.bottom; anchors.bottom: parent.bottom; anchors.left: root.compact ? parent.left : list.right; anchors.leftMargin: root.compact ? 0 : Style.space(5); anchors.right: parent.right; visible: !root.compact || root.narrowView === "detail"; issue: root.selectedIssue; detail: root.service ? root.service.selectedDetail : null; loading: root.service && root.service.detailLoading; onResolveRequested: root.confirm("resolve"); onAssignRequested: root.confirm("assign"); onReviewRequested: root.confirm("review"); onExplainRequested: root.confirm("explain"); onIgnoreRequested: root.openIgnoreMenu(); onOpenRequested: if (root.service && root.service.selectedIssue) root.service.openIssue(root.service.selectedIssue); onCopyRequested: if (root.service && root.service.selectedIssue) root.service.copyIssue(root.service.selectedIssue) }
       }
       Item {
         id: footer; anchors.bottom: parent.bottom; anchors.left: parent.left; anchors.right: parent.right; height: Style.space(29)

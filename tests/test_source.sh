@@ -26,9 +26,11 @@ grep -q 'ignoreMenuFocus.forceActiveFocus' App.qml || fail "ignore picker must t
 grep -q 'event.text === "j".*Qt.Key_Down' App.qml || fail "popup navigation must accept j/k and arrows"
 grep -q 'Qt.Key_Return.*Qt.Key_Enter' App.qml || fail "popup navigation must accept Enter"
 grep -q 'Shortcut { sequence: "Z"' App.qml || fail "ignore must have a window-level keyboard shortcut"
+grep -q 'Shortcut { sequence: "I".*root.confirm("explain")' App.qml || fail "agent handoff must have a window-level keyboard shortcut"
 grep -q 'Shortcut { sequence: "Return".*root.runPending' App.qml || fail "confirmations must be keyboard-operable after popup focus changes"
 grep -q 'Keys.priority: Keys.BeforeItem' App.qml || fail "panel commands must take priority over clicked controls"
 grep -q 'function actionDescription' App.qml || fail "confirmations must explain where issues go"
+grep -q 'agent may transmit this context to its provider' App.qml || fail "agent handoff confirmation must disclose external context"
 if grep -nE 'bash[" ]*,[" ]*-c|sh[" ]*,[" ]*-c|\| *bash|\| *sh' Service.qml; then
   fail "Service must not evaluate remote data as shell code"
 fi

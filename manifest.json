@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "wbarakat.trace",
   "name": "Trace",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "Waleed Barakat",
   "license": "MIT",
-  "description": "A native Sentry inbox for new and regressed production errors.",
+  "description": "A keyboard-first Sentry inbox with native triage, project scope, and default-agent handoff.",
   "kinds": ["service", "bar-widget", "panel"],
   "activation": "on-demand",
   "entryPoints": {
@@ -15,7 +15,7 @@
   },
   "barWidget": {
     "displayName": "Trace",
-    "description": "Surface new and regressed Sentry issues in the bar.",
+    "description": "Triage Sentry issues and hand them to your default agent.",
     "category": "Development",
     "aliases": ["trace", "sentry", "errors", "issues", "production"],
     "allowMultiple": false,

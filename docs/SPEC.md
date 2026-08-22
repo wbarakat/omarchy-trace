@@ -31,6 +31,7 @@ Three surfaces, one plugin:
 - `a`: assign to me
 - `x`: mark reviewed
 - `z`: choose a timed ignore duration
+- `i`: explain with the configured Omarchy agent after privacy confirmation
 - `o`: open in Sentry
 - `y`: copy issue permalink
 - `/` or `Ctrl+K`: search
@@ -44,6 +45,11 @@ Three surfaces, one plugin:
 Review, resolve, assignment, and ignore update only after the helper returns
 success. Errors leave the current state intact and appear in the window's
 status line.
+
+Agent handoff uses `omarchy agent prompt`, never provider-specific commands.
+Trace sends a bounded diagnostic packet only after confirmation, marks every
+Sentry field as untrusted data, and asks the agent not to modify files unless
+the user explicitly requests that in the agent session.
 
 ## Setup
 

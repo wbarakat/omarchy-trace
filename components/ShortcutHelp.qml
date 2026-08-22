@@ -14,7 +14,7 @@ Rectangle {
     color: Color.background; border.width: Style.space(1); border.color: Color.accent
     Column { id: content; anchors.fill: parent; anchors.margins: Style.space(16); spacing: Style.space(7)
       Text { text: "TRACE SHORTCUTS"; color: Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall }
-      Repeater { model: [["j / k · ↑ / ↓", "move selection or popup choice"], ["Enter", "open, choose, or confirm"], ["Esc", "cancel, back, then close"], ["e · a · x · z", "resolve · assign · review · timed ignore"], ["o · y", "open in Sentry · copy permalink"], ["/ · Ctrl+K", "search"], ["p", "choose project scope"], ["g r · g u", "regressions · unresolved"], ["F5", "refresh"]]
+      Repeater { model: [["j / k · ↑ / ↓", "move selection or popup choice"], ["Enter", "open, choose, or confirm"], ["Esc", "cancel, back, then close"], ["e · a · x · z", "resolve · assign · review · timed ignore"], ["i", "explain with default agent"], ["o · y", "open in Sentry · copy permalink"], ["/ · Ctrl+K", "search"], ["p", "choose project scope"], ["g r · g u", "regressions · unresolved"], ["F5", "refresh"]]
         delegate: Row {
           width: parent.width
           Text { text: modelData[0]; width: Style.space(165); color: Color.foreground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall }

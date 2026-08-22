@@ -68,6 +68,8 @@ Item {
   // can alert again without lastSeen timestamp churn creating duplicates.
   property var _activeRegressions: ({})
   property string _selectedId: ""
+  property string _agentPrompt: ""
+  property string _agentStdout: ""
 
   function setting(name, fallback) {
     var value = settings ? settings[name] : undefined
@@ -219,6 +221,21 @@ Item {
     if (url) Quickshell.execDetached(["wl-copy", "--", url])
   }
 
+  function explainIssue(issue, detail) {
+    if (agentProbe.running) {
+      message = "Agent handoff is already starting."
+      return
+    }
+    var prompt = Model.agentPrompt(issue || selectedIssue, detail || selectedDetail)
+    if (!prompt) {
+      message = "Select an issue before handing it off."
+      return
+    }
+    _agentPrompt = prompt
+    _agentStdout = ""
+    agentProbe.running = true
+  }
+
   // The token is deliberately absent from command.  Process.write is used
   // after start and the helper reads one JSON line, then continues without
   // waiting for EOF (Quickshell keeps stdin open).
@@ -283,6 +300,31 @@ Item {
     repeat: true
     running: root.configured || root.demoMode
     onTriggered: root.refresh()
+  }
+
+  Process {
+    id: agentProbe
+    command: ["omarchy", "default", "agent"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root._agentStdout = text
+    }
+    onExited: function(exitCode) {
+      var prompt = root._agentPrompt
+      root._agentPrompt = ""
+      if (exitCode !== 0) {
+        root.message = "Could not determine the default Omarchy agent."
+        return
+      }
+      var agent = Model.shortText(root._agentStdout)
+      if (!agent) {
+        root.message = "Choose a default agent, then press [i] again."
+        Quickshell.execDetached(["omarchy", "menu", "summon", "setup.default.agent"])
+        return
+      }
+      Quickshell.execDetached(["omarchy", "agent", "prompt", prompt])
+      root.message = "Handed off to " + agent + "."
+    }
   }
 
   Process {

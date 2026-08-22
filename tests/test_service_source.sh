@@ -6,7 +6,7 @@ fail() { printf 'test_service_source.sh: %s\n' "$1" >&2; exit 1; }
 for property in state message ready configured demoMode issues visibleIssues unreadCount regressionCount selectedIssue selectedDetail selectedIndex loading detailLoading lastFetchedAt barTooltip windowOpen projectFilter projectOptions; do
   grep -q "property .*${property}" Service.qml || fail "Service must expose ${property}"
 done
-for method in applySettings refresh selectIndex moveSelection openSelected openWindow closeWindow back setFilter setSearch setProjectFilter loadDetail resolveIssue assignIssue ignoreIssue reviewIssue openIssue copyIssue saveSetup enableDemo disableDemo clearCredentials; do
+for method in applySettings refresh selectIndex moveSelection openSelected openWindow closeWindow back setFilter setSearch setProjectFilter loadDetail resolveIssue assignIssue ignoreIssue reviewIssue openIssue copyIssue explainIssue saveSetup enableDemo disableDemo clearCredentials; do
   grep -q "function ${method}" Service.qml || fail "Service must implement ${method}"
 done
 grep -q 'property var shell' Service.qml || fail "shell injection property missing"
@@ -21,4 +21,6 @@ grep -q 'enqueue(kind, \[id\].*demoMode)' Service.qml || fail "demo actions must
 grep -q 'applyDemoAction' Service.qml || fail "demo actions must update the local model"
 grep -q 'selectedDetail = null' Service.qml || fail "selection scope changes must clear stale detail"
 grep -q 'running: root.configured || root.demoMode' Service.qml || fail "polling must wait for status/configuration"
+grep -q 'command: \["omarchy", "default", "agent"\]' Service.qml || fail "handoff must honor the Omarchy default agent"
+grep -q 'Quickshell.execDetached(\["omarchy", "agent", "prompt", prompt\])' Service.qml || fail "handoff must use Omarchy's native prompt command"
 printf 'test_service_source.sh ok\n'

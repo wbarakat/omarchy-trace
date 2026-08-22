@@ -5,19 +5,19 @@ puts the frequent triage loop in a calm bar badge and tiled Quickshell window;
 Sentry remains the place for event exploration, releases, dashboards, and
 administration.
 
-## What it does
+## At a glance
 
-- polls an organization issue list and caches the last valid response through
-  the helper;
-- scopes the feed to selected projects and environments, with a fast in-window
-  project switcher;
-- orders regressions, unreviewed inbox items, and explicit Sentry priorities
-  ahead of routine issues without turning a quiet bar into a vanity counter;
-- shows issue metadata, tags, breadcrumbs, and highlights in-app stack frames;
-- reviews, resolves, assigns to the authenticated member, and timed-ignores
-  issues;
-- opens or copies the canonical Sentry permalink;
-- has a demo path using the same service, model, and UI as live data.
+| Feature | What Trace does |
+| --- | --- |
+| Calm bar inbox | Polls Sentry in the background and only asks for attention when an issue is new, unreviewed, regressed, or disconnected. |
+| Project and environment scope | Loads selected Sentry projects and environments, then switches project scope instantly from the keyboard. |
+| Triage ordering | Puts regressions first, followed by unreviewed issues, explicit Sentry priority, and recency. |
+| Native issue context | Shows metadata, tags, affected users, breadcrumbs, and highlighted in-app stack frames without embedding a browser. |
+| Explain with AI | Hands a bounded diagnostic packet to the user’s configured Omarchy agent after an explicit privacy confirmation. |
+| Sentry actions | Reviews, resolves, assigns to the authenticated member, and timed-ignores issues without deleting data. |
+| Regression notifications | Sends one quiet desktop notification when an issue newly enters regression, with deduplication while it remains regressed. |
+| Keyboard-first workflow | Supports navigation, search, project switching, every triage action, agent handoff, refresh, and help without a mouse. |
+| Offline demo | Exercises the same service, model, detail, filter, and action paths with checked-in fictional data. |
 
 It does not delete Sentry data, edit alert rules, provide dashboards, or embed a
 browser. The initial provider is Sentry SaaS and self-hosted Sentry REST APIs.
@@ -45,6 +45,7 @@ Trace never edits Hyprland, Omarchy themes, or other user configuration.
 - `secret-tool` from `libsecret` for live credentials;
 - `wl-copy` from `wl-clipboard` for the copy action;
 - `notify-send` from `libnotify` for optional regression notifications.
+- a configured Omarchy default agent for the optional Explain with AI handoff.
 
 Demo mode is offline and only requires Omarchy plus `jq`.
 
@@ -86,6 +87,7 @@ from Settings to return to the configured organization.
 | `a` | Assign it to me |
 | `x` | Mark it reviewed |
 | `z`, then `j` / `k`, `Enter` | Choose a timed ignore duration; confirm with `Enter` |
+| `i` | Explain with the configured Omarchy agent after confirmation |
 | `o` | Open the Sentry permalink |
 | `y` | Copy the permalink |
 | `/`, `Ctrl+K` | Search |
@@ -105,6 +107,7 @@ leaves the issue intact and puts its safe, shortened error in the status line.
 | Resolve | Leaves the issue in Sentry as resolved and removes it from Trace’s unresolved inbox. |
 | Assign | Assigns the issue to your Sentry account and keeps it in the inbox. |
 | Ignore | Marks the issue ignored for the chosen duration; it leaves the inbox until Sentry reactivates it. |
+| Explain | Sends bounded issue context to the configured Omarchy agent; it does not change the issue in Sentry. |
 | Open / copy | Does not change the issue; it opens or copies the canonical Sentry URL. |
 
 In demo mode these changes are local and reset when the demo data reloads.
@@ -125,7 +128,10 @@ fetch (10–100 issues), and pagination is not yet exposed. Large organizations
 may still encounter Sentry rate limits, and filters narrow the list rather than
 changing Sentry permissions. Stack traces and breadcrumbs can contain
 application-sensitive information; they remain local until you explicitly open
-the permalink or copy it.
+the permalink, copy it, or confirm an agent handoff. Explain with AI may send
+the displayed issue metadata, tags, stack trace, breadcrumbs, and permalink to
+the configured agent provider. Trace labels the entire diagnostic block as
+untrusted data and asks the agent not to modify files without a separate request.
 
 ## Removal
 

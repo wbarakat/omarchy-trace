@@ -10,6 +10,7 @@ Item {
   signal resolveRequested()
   signal assignRequested()
   signal reviewRequested()
+  signal explainRequested()
   signal ignoreRequested()
   signal openRequested()
   signal copyRequested()
@@ -60,6 +61,7 @@ Item {
         TraceButton { text: "assign [a]"; onClicked: root.assignRequested() }
         TraceButton { text: "review [x]"; onClicked: root.reviewRequested() }
         TraceButton { text: "ignore [z]"; onClicked: root.ignoreRequested() }
+        TraceButton { text: "explain [i]"; onClicked: root.explainRequested() }
         TraceButton { text: "open [o]"; onClicked: root.openRequested() }
         TraceButton { text: "copy [y]"; onClicked: root.copyRequested() }
       }
