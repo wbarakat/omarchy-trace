@@ -69,17 +69,77 @@ valid_url() {
 }
 clean_url() { printf '%s' "${1%/}"; }
 
-read_bounded_config() {
-  local size
-  [ -f "$CONFIG_FILE" ] && [ ! -L "$CONFIG_FILE" ] || return 1
-  size=$(stat -c %s -- "$CONFIG_FILE" 2>/dev/null) || return 1
-  [ "$size" -gt 0 ] && [ "$size" -le "$MAX_CONFIG_BYTES" ] || return 1
-  CONFIG_JSON=$(head -c $((MAX_CONFIG_BYTES + 1)) -- "$CONFIG_FILE" 2>/dev/null) || return 1
-  [ "$(printf '%s' "$CONFIG_JSON" | wc -c)" -le "$MAX_CONFIG_BYTES" ] || return 1
-  printf '%s' "$CONFIG_JSON" | jq -Rse 'fromjson | type == "object"' >/dev/null 2>&1
+read_bounded_regular_file() {
+  local source=$1 maximum=$2
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 - "$source" "$maximum" <<'PY'
+import os
+import stat
+import sys
+
+path = sys.argv[1]
+try:
+    maximum = int(sys.argv[2])
+except (TypeError, ValueError):
+    raise SystemExit(1)
+if maximum <= 0:
+    raise SystemExit(1)
+
+fd = -1
+try:
+    fd = os.open(
+        path,
+        os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0),
+    )
+    opened = os.fstat(fd)
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or opened.st_uid != os.geteuid()
+        or opened.st_size <= 0
+        or opened.st_size > maximum
+    ):
+        raise OSError
+
+    chunks = []
+    remaining = maximum + 1
+    while remaining:
+        chunk = os.read(fd, min(65536, remaining))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+
+    contents = b"".join(chunks)
+    final = os.fstat(fd)
+    if (
+        not stat.S_ISREG(final.st_mode)
+        or final.st_uid != os.geteuid()
+        or final.st_size <= 0
+        or final.st_size > maximum
+        or not contents
+        or len(contents) > maximum
+    ):
+        raise OSError
+
+    output = sys.stdout.buffer
+    output.write(contents)
+    output.flush()
+except (OSError, ValueError):
+    raise SystemExit(1)
+finally:
+    if fd >= 0:
+        os.close(fd)
+PY
 }
 
-config_exists() { read_bounded_config; }
+read_bounded_config() {
+  CONFIG_JSON=$(
+    set -o pipefail
+    read_bounded_regular_file "$CONFIG_FILE" "$MAX_CONFIG_BYTES" 2>/dev/null \
+      | jq -Rsec 'fromjson | select(type == "object")' 2>/dev/null
+  ) || return 1
+  [ -n "$CONFIG_JSON" ]
+}
 
 load_config() {
   local config_line project count=0
@@ -249,12 +309,8 @@ cache_list() {
 }
 
 copy_bounded_regular_file() {
-  local source=$1 destination=$2 maximum=$3 size
-  [ -f "$source" ] && [ ! -L "$source" ] || return 1
-  size=$(stat -c %s -- "$source" 2>/dev/null) || return 1
-  [ "$size" -gt 0 ] && [ "$size" -le "$maximum" ] || return 1
-  head -c $((maximum + 1)) -- "$source" >"$destination" 2>/dev/null || return 1
-  [ "$(wc -c <"$destination")" -le "$maximum" ]
+  local source=$1 destination=$2 maximum=$3
+  read_bounded_regular_file "$source" "$maximum" >"$destination" 2>/dev/null
 }
 
 fixture_detail() {
@@ -397,7 +453,7 @@ command_configure() {
 
 command_status() {
   if demo_enabled; then jq -cn '{schemaVersion:1,state:"ready",configured:true,demo:true}'; return; fi
-  if config_exists && load_config; then
+  if load_config; then
     if secret_available; then jq -cn --arg base "$BASE_URL" --arg organization "$ORG" '{schemaVersion:1,state:"ready",configured:true,baseUrl:$base,organization:$organization}'
     else jq -cn --arg base "$BASE_URL" --arg organization "$ORG" '{schemaVersion:1,state:"setup",configured:false,baseUrl:$base,organization:$organization,message:"Sentry token is not available"}'; fi
   else jq -cn '{schemaVersion:1,state:"unconfigured",configured:false}'; fi

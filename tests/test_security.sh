@@ -170,9 +170,16 @@ ln -s -- "$TMP/symlink-target.json" "$CURL_CONFIG/trace/config.json"
 symlink_config_status=$(PATH="$BIN:$PATH" XDG_CONFIG_HOME="$CURL_CONFIG" XDG_CACHE_HOME="$CURL_CACHE" "$API" status)
 jq -e '.state == "unconfigured" and .configured == false' <<<"$symlink_config_status" >/dev/null
 rm -f -- "$CURL_CONFIG/trace/config.json"
+mkfifo -- "$CURL_CONFIG/trace/config.json"
+fifo_config_status=$(timeout 2 env PATH="$BIN:$PATH" XDG_CONFIG_HOME="$CURL_CONFIG" XDG_CACHE_HOME="$CURL_CACHE" "$API" status)
+jq -e '.state == "unconfigured" and .configured == false' <<<"$fifo_config_status" >/dev/null
+rm -f -- "$CURL_CONFIG/trace/config.json"
 printf '%s\n%s\n' '{"baseUrl":"https://sentry.example.test","organization":"acme"}' '{}' >"$CURL_CONFIG/trace/config.json"
 multi_config_status=$(PATH="$BIN:$PATH" XDG_CONFIG_HOME="$CURL_CONFIG" XDG_CACHE_HOME="$CURL_CACHE" "$API" status)
 jq -e '.state == "unconfigured" and .configured == false' <<<"$multi_config_status" >/dev/null
+printf '{"base\0Url":"https://sentry.example.test","organization":"acme"}\n' >"$CURL_CONFIG/trace/config.json"
+nul_config_status=$(PATH="$BIN:$PATH" XDG_CONFIG_HOME="$CURL_CONFIG" XDG_CACHE_HOME="$CURL_CACHE" "$API" status)
+jq -e '.state == "unconfigured" and .configured == false' <<<"$nul_config_status" >/dev/null
 
 # Setup and notification stdin have independent hard byte ceilings.
 oversized_setup=$(jq -cn --arg token "$TEST_TOKEN" --arg padding "$(head -c 33000 /dev/zero | tr '\0' x)" \
@@ -188,11 +195,31 @@ jq -e '.state == "error" and .error.message == "notification payload exceeds the
 rm -f -- "$CURL_CONFIG/trace/config.json"
 cp -- "$TMP/symlink-target.json" "$CURL_CONFIG/trace/config.json"
 mkdir -p -- "$CURL_CACHE/trace"
+printf '%s\n' '[{"id":"cached-1","title":"Cached issue"}]' >"$CURL_CACHE/trace/list.json"
+valid_cache_output=$(PATH="$BIN:$PATH" XDG_CONFIG_HOME="$CURL_CONFIG" XDG_CACHE_HOME="$CURL_CACHE" \
+  TRACE_CURL_BIN="$BIN/curl" TRACE_MAX_RESPONSE_BYTES=65536 TRACE_TEST_CURL_ARGS="$TMP/curl-args" \
+  TRACE_TEST_FAIL=1 "$API" list 10)
+jq -e '.state == "stale" and .cached == true and .issues[0].id == "cached-1"' <<<"$valid_cache_output" >/dev/null
+
 head -c 1048577 /dev/zero | tr '\0' x >"$CURL_CACHE/trace/list.json"
 oversized_cache_output=$(PATH="$BIN:$PATH" XDG_CONFIG_HOME="$CURL_CONFIG" XDG_CACHE_HOME="$CURL_CACHE" \
   TRACE_CURL_BIN="$BIN/curl" TRACE_MAX_RESPONSE_BYTES=65536 TRACE_TEST_CURL_ARGS="$TMP/curl-args" \
   TRACE_TEST_FAIL=1 "$API" list 10 || :)
 jq -e '.state == "error" and .error.code == "network-error"' <<<"$oversized_cache_output" >/dev/null
+
+rm -f -- "$CURL_CACHE/trace/list.json"
+mkfifo -- "$CURL_CACHE/trace/list.json"
+fifo_cache_output=$(timeout 2 env PATH="$BIN:$PATH" XDG_CONFIG_HOME="$CURL_CONFIG" XDG_CACHE_HOME="$CURL_CACHE" \
+  TRACE_CURL_BIN="$BIN/curl" TRACE_MAX_RESPONSE_BYTES=65536 TRACE_TEST_CURL_ARGS="$TMP/curl-args" \
+  TRACE_TEST_FAIL=1 "$API" list 10 || :)
+jq -e '.state == "error" and .error.code == "network-error"' <<<"$fifo_cache_output" >/dev/null
+
+rm -f -- "$CURL_CACHE/trace/list.json"
+ln -s -- "$TMP/symlink-target.json" "$CURL_CACHE/trace/list.json"
+symlink_cache_output=$(PATH="$BIN:$PATH" XDG_CONFIG_HOME="$CURL_CONFIG" XDG_CACHE_HOME="$CURL_CACHE" \
+  TRACE_CURL_BIN="$BIN/curl" TRACE_MAX_RESPONSE_BYTES=65536 TRACE_TEST_CURL_ARGS="$TMP/curl-args" \
+  TRACE_TEST_FAIL=1 "$API" list 10 || :)
+jq -e '.state == "error" and .error.code == "network-error"' <<<"$symlink_cache_output" >/dev/null
 
 oversize_output=$(PATH="$BIN:$PATH" XDG_CONFIG_HOME="$CURL_CONFIG" XDG_CACHE_HOME="$TMP/no-cache" \
   TRACE_CURL_BIN="$BIN/curl" TRACE_MAX_RESPONSE_BYTES=65536 TRACE_TEST_CURL_ARGS="$TMP/curl-args" \
@@ -205,6 +232,11 @@ grep -qE 'environment=\$\(urlencode "\$environment"\)' "$ROOT/scripts/trace-api.
 grep -q 'expand=inbox' "$ROOT/scripts/trace-api.sh"
 grep -qE 'review\) payload=.*hasSeen.*inbox' "$ROOT/scripts/trace-api.sh"
 ! grep -qE 'to_entries\[|map\([^)]*\)\[0:|map\([^;]*\)\s*\|\s*\.\[0:' "$ROOT/scripts/trace-api.sh"
+grep -q 'os.O_NOFOLLOW | os.O_NONBLOCK' "$ROOT/scripts/trace-api.sh"
+grep -q 'opened = os.fstat(fd)' "$ROOT/scripts/trace-api.sh"
+grep -q 'stat.S_ISREG(opened.st_mode)' "$ROOT/scripts/trace-api.sh"
+grep -q 'opened.st_uid != os.geteuid()' "$ROOT/scripts/trace-api.sh"
+! grep -qE 'head -c .*\$CONFIG_FILE|stat -c .*\$CONFIG_FILE|head -c .*\$source|stat -c .*\$source' "$ROOT/scripts/trace-api.sh"
 
 ! grep -R -nE 'Bearer[[:space:]]+[A-Za-z0-9._-]{20,}' "$ROOT/scripts" "$ROOT/fixtures"
 

@@ -96,9 +96,11 @@ stops incremental collection at 1 MiB before parsing helper output. Provider
 lists and detail collections are sliced before field mapping; arbitrary nested
 metadata and frame variables are not copied across the helper boundary. The
 64 KiB local configuration and 1 MiB stale-cache limits are applied before
-parsing, and each source must contain one JSON document. Every Sentry helper
-invocation has a 90-second deadline, recurring refresh work is coalesced, and
-the remaining queue is capped.
+parsing. Persisted inputs are opened once without following symlinks and
+without blocking, then their type, owner, and size are checked on that same
+descriptor before its bounded bytes are read. Each source must contain one JSON
+document. Every Sentry helper invocation has a 90-second deadline, recurring
+refresh work is coalesced, and the remaining queue is capped.
 
 ## Visual direction
 

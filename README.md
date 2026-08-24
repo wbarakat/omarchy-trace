@@ -41,7 +41,7 @@ Trace never edits Hyprland, Omarchy themes, or other user configuration.
 ## Requirements
 
 - Omarchy Quattro with shell plugin support;
-- `curl` and `jq` for the Sentry REST helper;
+- `curl`, `jq`, and `python3` for the Sentry REST helper;
 - `secret-tool` from `libsecret` for live credentials;
 - `wl-copy` from `wl-clipboard` for the copy action;
 - `notify-send` from `libnotify` for optional regression notifications.
