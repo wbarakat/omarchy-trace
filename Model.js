@@ -9,7 +9,9 @@ var MAX_ARRAY = 120
 var MAX_AGENT_PROMPT = 12000
 
 function text(value, limit) {
-  var valueText = String(value === undefined || value === null ? "" : value)
+  var kind = typeof value
+  var scalar = value === undefined || value === null || kind === "object" || kind === "function" ? "" : value
+  var valueText = String(scalar)
   valueText = valueText.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
   valueText = valueText.replace(/\s+/g, " ").trim()
   var max = Math.max(4, Math.floor(Number(limit) || MAX_TEXT))
@@ -39,13 +41,6 @@ function priority(value) {
   if (raw === "2" || raw === "medium" || raw === "normal") return "medium"
   if (raw === "1" || raw === "low") return "low"
   return raw === "" ? "" : shortText(raw)
-}
-
-function copyObject(value) {
-  var result = {}
-  if (!value || typeof value !== "object" || Array.isArray(value)) return result
-  for (var key in value) result[key] = value[key]
-  return result
 }
 
 function stringArray(value, limit) {
@@ -99,11 +94,13 @@ function normalizeIssue(raw) {
 function normalizeMetadata(value) {
   var source = value && typeof value === "object" ? value : {}
   var result = {}
-  var keys = Object.keys(source)
-  for (var i = 0; i < keys.length && i < 40; i++) {
-    var key = shortText(keys[i])
+  var count = 0
+  for (var sourceKey in source) {
+    if (count >= 40) break
+    var key = shortText(sourceKey)
     if (!key) continue
-    result[key] = sanitize(source[key])
+    result[key] = sanitize(source[sourceKey])
+    count++
   }
   return result
 }

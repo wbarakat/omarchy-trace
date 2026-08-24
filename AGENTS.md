@@ -29,9 +29,10 @@ and hand deep investigation back to Sentry.
   `environment`, `level`, `priority`, `hasSeen`, `inInbox`, `status`,
   `substatus`, `isUnhandled`, `isRegression`, `count`, `userCount`, `firstSeen`,
   `lastSeen`, `assignedTo`, `permalink`.
-- Detail documents add `metadata`, `tags`, `stacktrace`, and `breadcrumbs`.
+- Detail documents add fixed scalar `metadata`, `tags`, `stacktrace`, and `breadcrumbs`.
 - Stack frames use: `filename`, `function`, `module`, `line`, `column`,
-  `context`, `inApp`, `vars`.
+  `context`, `inApp`, `vars`; provider frame variables are deliberately returned
+  as an empty object rather than copied recursively.
 
 ## Validation
 

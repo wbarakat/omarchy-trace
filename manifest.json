@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "wbarakat.trace",
   "name": "Trace",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "author": "Waleed Barakat",
   "license": "MIT",
   "description": "A keyboard-first Sentry inbox with native triage, project scope, and default-agent handoff.",

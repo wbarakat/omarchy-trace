@@ -12,7 +12,7 @@ administration.
 | Calm bar inbox | Polls Sentry in the background and only asks for attention when an issue is new, unreviewed, regressed, or disconnected. |
 | Project and environment scope | Loads selected Sentry projects and environments, then switches project scope instantly from the keyboard. |
 | Triage ordering | Puts regressions first, followed by unreviewed issues, explicit Sentry priority, and recency. |
-| Native issue context | Shows metadata, tags, affected users, breadcrumbs, and highlighted in-app stack frames without embedding a browser. |
+| Native issue context | Shows tags, affected users, breadcrumbs, and highlighted in-app stack frames without embedding a browser. |
 | Explain with AI | Hands a bounded diagnostic packet to the user’s configured Omarchy agent after an explicit privacy confirmation. |
 | Sentry actions | Reviews, resolves, assigns to the authenticated member, and timed-ignores issues without deleting data. |
 | Regression notifications | Sends one quiet desktop notification when an issue newly enters regression, with deduplication while it remains regressed. |
@@ -132,6 +132,14 @@ Provider issue arrays are sliced to the configured 10–100 issue window before
 field normalization. Every Sentry helper invocation has a 90-second process
 deadline, recurring refreshes are coalesced while work is active, and the
 remaining operation queue is capped rather than allowed to grow without bound.
+
+Detail entries, frames, tags, and breadcrumbs are each sliced to 100 items
+before mapping. Trace accepts one JSON document per response, copies only known
+scalar metadata fields, and does not retain arbitrary frame variables or nested
+provider objects. Local configuration is capped at 64 KiB and project and
+environment arrays at 20 items before mapping; stale caches are capped at 1 MiB
+and normalized again before use. Setup and notification stdin are independently
+bounded as well.
 
 Trace is a thin inbox, not a replacement for Sentry. One connection represents
 one Sentry organization; switching organizations deliberately means

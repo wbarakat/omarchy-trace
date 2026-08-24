@@ -12,6 +12,13 @@ CONFIG_DIR="$CONFIG_HOME/trace"
 CONFIG_FILE="$CONFIG_DIR/config.json"
 CACHE_DIR="$CACHE_HOME/trace"
 LIST_CACHE="$CACHE_DIR/list.json"
+MAX_CONFIG_BYTES=65536
+MAX_CACHE_BYTES=1048576
+MAX_STDIN_BYTES=32768
+MAX_NOTIFY_BYTES=4096
+MAX_TOKEN_BYTES=4096
+MAX_FILTER_ITEMS=20
+MAX_DETAIL_ITEMS=100
 
 # The shell asks for chunked output so its streaming parser never has to hold
 # an attacker-sized line. CLI output remains ordinary compact JSON.
@@ -62,25 +69,66 @@ valid_url() {
 }
 clean_url() { printf '%s' "${1%/}"; }
 
-config_value() { jq -er --arg key "$1" '.[$key] // empty' "$CONFIG_FILE" 2>/dev/null; }
-config_exists() { [ -s "$CONFIG_FILE" ] && jq -e 'type == "object"' "$CONFIG_FILE" >/dev/null 2>&1; }
+read_bounded_config() {
+  local size
+  [ -f "$CONFIG_FILE" ] && [ ! -L "$CONFIG_FILE" ] || return 1
+  size=$(stat -c %s -- "$CONFIG_FILE" 2>/dev/null) || return 1
+  [ "$size" -gt 0 ] && [ "$size" -le "$MAX_CONFIG_BYTES" ] || return 1
+  CONFIG_JSON=$(head -c $((MAX_CONFIG_BYTES + 1)) -- "$CONFIG_FILE" 2>/dev/null) || return 1
+  [ "$(printf '%s' "$CONFIG_JSON" | wc -c)" -le "$MAX_CONFIG_BYTES" ] || return 1
+  printf '%s' "$CONFIG_JSON" | jq -Rse 'fromjson | type == "object"' >/dev/null 2>&1
+}
+
+config_exists() { read_bounded_config; }
 
 load_config() {
-  config_exists || return 1
-  BASE_URL=$(config_value baseUrl) || return 1
-  ORG=$(config_value organization) || return 1
-  PROJECTS=$(jq -r '(.projects // []) | if type == "array" then map(tostring|gsub("^[[:space:]]+|[[:space:]]+$";""))|join(",") else tostring end' "$CONFIG_FILE" 2>/dev/null) || PROJECTS=""
+  local config_line project count=0
+  read_bounded_config || return 1
+  config_line=$(printf '%s' "$CONFIG_JSON" | jq -Rer --argjson max "$MAX_FILTER_ITEMS" '
+    fromjson |
+    def clean($limit):
+      if type == "string" then gsub("[[:cntrl:]]"; "") | gsub("\\u007f"; "") | gsub("^[[:space:]]+|[[:space:]]+$"; "") | .[0:$limit]
+      else "" end;
+    def csv($default):
+      if type == "array" then .[0:$max] | map(select(type == "string") | clean(128)) | map(select(length > 0)) | join(",")
+      elif type == "string" then clean(2580)
+      elif . == null then $default
+      else "" end;
+    [(.baseUrl | clean(2048)), (.organization | clean(128)), (.projects | csv("")),
+     (if has("environments") then (.environments | csv("")) else "production" end)] | @tsv
+  ' 2>/dev/null) || return 1
+  IFS=$'\t' read -r BASE_URL ORG PROJECTS ENVIRONMENTS <<<"$config_line"
   # Older config files had no environment filter. Keep them usable while
   # matching the setup UI's production default; an explicit blank means all.
-  ENVIRONMENTS=$(jq -r 'if has("environments") then (.environments // [] | if type == "array" then map(tostring|gsub("^[[:space:]]+|[[:space:]]+$";""))|join(",") else tostring end) else "production" end' "$CONFIG_FILE" 2>/dev/null) || ENVIRONMENTS="production"
   valid_url "$BASE_URL" || return 1
   valid_identifier "$ORG" || return 1
+  if [ -n "$PROJECTS" ]; then
+    IFS=',' read -r -a loaded_projects <<<"$PROJECTS"
+    for project in "${loaded_projects[@]}"; do
+      valid_identifier "$project" || return 1
+      count=$((count + 1)); [ "$count" -le "$MAX_FILTER_ITEMS" ] || return 1
+    done
+  fi
+  count=0
+  if [ -n "$ENVIRONMENTS" ]; then
+    IFS=',' read -r -a loaded_environments <<<"$ENVIRONMENTS"
+    for project in "${loaded_environments[@]}"; do
+      [ -n "$project" ] && [ "${#project}" -le 128 ] || return 1
+      count=$((count + 1)); [ "$count" -le "$MAX_FILTER_ITEMS" ] || return 1
+    done
+  fi
   return 0
 }
 
 secret_lookup() {
   command -v secret-tool >/dev/null 2>&1 || return 2
-  secret-tool lookup service trace base-url "$BASE_URL" organization "$ORG" 2>/dev/null
+  (set -o pipefail; secret-tool lookup service trace base-url "$BASE_URL" organization "$ORG" 2>/dev/null | head -c $((MAX_TOKEN_BYTES + 1)))
+}
+
+secret_available() {
+  local candidate
+  candidate=$(secret_lookup) || return 1
+  [[ "$candidate" =~ ^[A-Za-z0-9._~-]{1,4096}$ ]]
 }
 
 write_config() {
@@ -137,18 +185,18 @@ curl_api() {
   API_CODE="$http"; API_BODY="$body"; return 0
 }
 
-normalize_issue_jq=''
 normalize_issue() {
-  jq -c '
-    def text: (if . == null then "" elif type == "string" then (gsub("[[:cntrl:]]"; "") | gsub("\\u007f"; "") | .[0:1000]) else tostring end);
-    def number: (if . == null then 0 elif type == "number" then . elif (tonumber? // null) != null then tonumber else 0 end);
+  jq -Rsc '
+    def text: (if . == null then "" elif type == "string" then (gsub("[[:cntrl:]]"; "") | gsub("\\u007f"; "") | .[0:500]) elif type == "number" or type == "boolean" then tostring else "" end);
+    def number: (if type == "number" then . elif type == "string" and length <= 64 then (tonumber? // 0) else 0 end);
     def boolean: (if . == true then true else false end);
     def seen: (if has("hasSeen") then (.hasSeen|boolean) elif has("has_seen") then (.has_seen|boolean) else false end);
     def inbox: (if has("inInbox") then (.inInbox|boolean) elif has("in_inbox") then (.in_inbox|boolean) else (.inbox != null) end);
+    (fromjson? // {} | if type == "object" then . else {} end) |
     {id:(.id|text), shortId:((.shortId // .short_id // .id)|text),
      title:((.title // .metadata.value // .culprit // "Untitled")|text), culprit:(.culprit|text),
      project:((.project.slug // .project.name // .project // "")|text), environment:((.environment // .matchingEventEnvironment)|text),
-     level:((.level // "error")|text), priority:((.priority // "")|tostring|ascii_downcase|if .=="high" or .=="medium" or .=="low" then . else "" end), hasSeen:seen, inInbox:inbox, status:((.status // "unresolved")|text),
+     level:((.level // "error")|text), priority:((.priority // "")|text|ascii_downcase|if .=="high" or .=="medium" or .=="low" then . else "" end), hasSeen:seen, inInbox:inbox, status:((.status // "unresolved")|text),
      substatus:((.substatus // .statusDetails.substatus // "")|text),
      isUnhandled:((.isUnhandled // .is_unhandled // false)|boolean),
      isRegression:((.isRegression // .is_regression // (.substatus == "regressed"))|boolean),
@@ -161,19 +209,21 @@ normalize_issue() {
 normalize_list() {
   local source=$1 out=$2 limit=${3:-100}
   [[ "$limit" =~ ^[0-9]+$ ]] && [ "$limit" -ge 1 ] && [ "$limit" -le 100 ] || return 1
-  jq -c --argjson limit "$limit" '
+  [ -f "$source" ] || return 1
+  jq -cn --rawfile raw "$source" --argjson limit "$limit" '
     def issue: (
-      def text: (if . == null then "" elif type == "string" then (gsub("[[:cntrl:]]"; "") | gsub("\\u007f"; "") | .[0:1000]) else tostring end);
-      def number: (if . == null then 0 elif type == "number" then . elif (tonumber? // null) != null then tonumber else 0 end);
+      def text: (if . == null then "" elif type == "string" then (gsub("[[:cntrl:]]"; "") | gsub("\\u007f"; "") | .[0:500]) elif type == "number" or type == "boolean" then tostring else "" end);
+      def number: (if type == "number" then . elif type == "string" and length <= 64 then (tonumber? // 0) else 0 end);
       def boolean: (if . == true then true else false end);
       def seen: (if has("hasSeen") then (.hasSeen|boolean) elif has("has_seen") then (.has_seen|boolean) else false end);
       def inbox: (if has("inInbox") then (.inInbox|boolean) elif has("in_inbox") then (.in_inbox|boolean) else (.inbox != null) end);
-      {id:(.id|text), shortId:((.shortId // .short_id // .id)|text), title:((.title // .metadata.value // .culprit // "Untitled")|text), culprit:(.culprit|text), project:((.project.slug // .project.name // .project // "")|text), environment:((.environment // .matchingEventEnvironment)|text), level:((.level // "error")|text), priority:((.priority // "")|tostring|ascii_downcase|if .=="high" or .=="medium" or .=="low" then . else "" end), hasSeen:seen, inInbox:inbox, status:((.status // "unresolved")|text), substatus:((.substatus // .statusDetails.substatus // "")|text), isUnhandled:((.isUnhandled // .is_unhandled // false)|boolean), isRegression:((.isRegression // .is_regression // (.substatus == "regressed"))|boolean), count:((.count)|number), userCount:((.userCount // .user_count)|number), firstSeen:((.firstSeen // .first_seen)|text), lastSeen:((.lastSeen // .last_seen)|text), assignedTo:(if .assignedTo == null then "" elif (.assignedTo|type)=="object" then ((.assignedTo.name // .assignedTo.email // .assignedTo.id)|text) else (.assignedTo|text) end), permalink:((.permalink // .web_url // "")|text)}
+      {id:(.id|text), shortId:((.shortId // .short_id // .id)|text), title:((.title // .metadata.value // .culprit // "Untitled")|text), culprit:(.culprit|text), project:((.project.slug // .project.name // .project // "")|text), environment:((.environment // .matchingEventEnvironment)|text), level:((.level // "error")|text), priority:((.priority // "")|text|ascii_downcase|if .=="high" or .=="medium" or .=="low" then . else "" end), hasSeen:seen, inInbox:inbox, status:((.status // "unresolved")|text), substatus:((.substatus // .statusDetails.substatus // "")|text), isUnhandled:((.isUnhandled // .is_unhandled // false)|boolean), isRegression:((.isRegression // .is_regression // (.substatus == "regressed"))|boolean), count:((.count)|number), userCount:((.userCount // .user_count)|number), firstSeen:((.firstSeen // .first_seen)|text), lastSeen:((.lastSeen // .last_seen)|text), assignedTo:(if .assignedTo == null then "" elif (.assignedTo|type)=="object" then ((.assignedTo.name // .assignedTo.email // .assignedTo.id)|text) else (.assignedTo|text) end), permalink:((.permalink // .web_url // "")|text)}
     );
-    (if type == "array" then . elif (.issues|type)=="array" then .issues else [] end)
+    ($raw | fromjson) as $document |
+    (if ($document|type) == "array" then $document elif ($document.issues|type)=="array" then $document.issues else [] end)
     | .[0:$limit]
     | map(issue)
-  ' "$source" >"$out" 2>/dev/null || return 1
+  ' >"$out" 2>/dev/null || return 1
 }
 
 emit_list() {
@@ -198,6 +248,15 @@ cache_list() {
   tmp=$(tmpfile); jq -c . "$normalized" >"$tmp" 2>/dev/null && chmod 600 "$tmp" && mv -f -- "$tmp" "$LIST_CACHE"
 }
 
+copy_bounded_regular_file() {
+  local source=$1 destination=$2 maximum=$3 size
+  [ -f "$source" ] && [ ! -L "$source" ] || return 1
+  size=$(stat -c %s -- "$source" 2>/dev/null) || return 1
+  [ "$size" -gt 0 ] && [ "$size" -le "$maximum" ] || return 1
+  head -c $((maximum + 1)) -- "$source" >"$destination" 2>/dev/null || return 1
+  [ "$(wc -c <"$destination")" -le "$maximum" ]
+}
+
 fixture_detail() {
   local id=$1 f
   f="$FIXTURE_DIR/issue-$id.json"
@@ -207,18 +266,33 @@ fixture_detail() {
 
 normalize_detail() {
   local issue=$1 event=$2
-  jq -cn --slurpfile i "$issue" --slurpfile e "$event" '
-    def text: (if . == null then "" elif type == "string" then (gsub("[[:cntrl:]]"; "") | gsub("\\u007f"; "") | .[0:2000]) else tostring end);
-    def safe: if type == "string" then (gsub("[[:cntrl:]]"; "") | gsub("\\u007f"; "") | .[0:1000]) elif type == "array" then map(safe)[0:100] elif type == "object" then (to_entries[0:100] | map(.value |= safe) | from_entries) else . end;
-    def frame: {filename:((.filename // .absPath // .module // "")|text), function:((.function // .name // "")|text), module:((.module // "")|text), line:(.lineNo // .line // null), column:(.colNo // .column // null), context:((.context_line // .context // "")|text), inApp:(.inApp // .in_app // false), vars:(if (.vars|type)=="object" then (.vars|safe) else {} end)};
-    def issue: ($i[0] | (
-      def num: (if . == null then 0 elif type=="number" then . elif (tonumber? // null)!=null then tonumber else 0 end);
+  jq -cn --rawfile issue_json "$issue" --rawfile event_json "$event" --argjson max "$MAX_DETAIL_ITEMS" '
+    def scalar($limit): (if . == null then "" elif type == "string" then (gsub("[[:cntrl:]]"; "") | gsub("\\u007f"; "") | .[0:$limit]) elif type == "number" or type == "boolean" then tostring else "" end);
+    def text: scalar(500);
+    def shorttext: scalar(128);
+    def longtext: scalar(1000);
+    def integer: (if type == "number" then floor elif type == "string" and length <= 32 then (tonumber? // null) else null end);
+    def frame: {filename:((.filename // .absPath // .module // "")|text), function:((.function // .name // "")|text), module:((.module // "")|shorttext), line:((.lineNo // .line // null)|integer), column:((.colNo // .column // null)|integer), context:((.context_line // .context // "")|longtext), inApp:((.inApp // .in_app // false) == true), vars:{}};
+    ($issue_json | fromjson | if type == "object" then . else {} end) as $i |
+    ($event_json | fromjson | if type == "object" then . else {} end) as $e |
+    def issue: ($i | (
+      def num: (if type=="number" then . elif type == "string" and length <= 64 then (tonumber? // 0) else 0 end);
       def boolean: (if . == true then true else false end);
       def seen: (if has("hasSeen") then (.hasSeen|boolean) elif has("has_seen") then (.has_seen|boolean) else false end);
       def inbox: (if has("inInbox") then (.inInbox|boolean) elif has("in_inbox") then (.in_inbox|boolean) else (.inbox != null) end);
-      {id:(.id|text), shortId:((.shortId // .short_id // .id)|text), title:((.title // .metadata.value // .culprit // "Untitled")|text), culprit:(.culprit|text), project:((.project.slug // .project.name // .project // "")|text), environment:((.environment // .matchingEventEnvironment)|text), level:((.level // "error")|text), priority:((.priority // "")|tostring|ascii_downcase|if .=="high" or .=="medium" or .=="low" then . else "" end), hasSeen:seen, inInbox:inbox, status:((.status // "unresolved")|text), substatus:((.substatus // .statusDetails.substatus // "")|text), isUnhandled:(.isUnhandled // .is_unhandled // false), isRegression:((.isRegression // .is_regression // (.substatus == "regressed")) == true), count:(.count|num), userCount:((.userCount // .user_count)|num), firstSeen:((.firstSeen // .first_seen)|text), lastSeen:((.lastSeen // .last_seen)|text), assignedTo:(if .assignedTo == null then "" elif (.assignedTo|type)=="object" then ((.assignedTo.name // .assignedTo.email // .assignedTo.id)|text) else (.assignedTo|text) end), permalink:((.permalink // .web_url // "")|text)}));
-    ($e[0].entries // [] | map(select(.type == "exception" or .type == "stacktrace")) | .[0].data.values[0].stacktrace.frames // []) as $frames |
-    {schemaVersion:1,state:"ready",issue:issue,metadata:(($i[0].metadata // {}) | if type=="object" then (to_entries[0:100] | map(.value |= text) | from_entries) else {} end),tags:(($e[0].tags // $i[0].tags // []) | if type=="array" then [map(if type=="array" then {key:(.[0]|text),value:(.[1]|text)} elif type=="object" then {key:(.key // .name // ""|text),value:(.value // ""|text)} else empty end)[]][0:100] else [] end),stacktrace:($frames|map(frame))[0:100],breadcrumbs:(($e[0].breadcrumbs.values // []) | if type=="array" then [map({timestamp:(.timestamp|text),category:(.category|text),message:(.message // .data // ""|text),level:(.level|text)})[]][0:100] else [] end)}
+      {id:(.id|text), shortId:((.shortId // .short_id // .id)|text), title:((.title // .metadata.value // .culprit // "Untitled")|text), culprit:(.culprit|text), project:((.project.slug // .project.name // .project // "")|text), environment:((.environment // .matchingEventEnvironment)|text), level:((.level // "error")|text), priority:((.priority // "")|text|ascii_downcase|if .=="high" or .=="medium" or .=="low" then . else "" end), hasSeen:seen, inInbox:inbox, status:((.status // "unresolved")|text), substatus:((.substatus // .statusDetails.substatus // "")|text), isUnhandled:((.isUnhandled // .is_unhandled // false)|boolean), isRegression:((.isRegression // .is_regression // (.substatus == "regressed"))|boolean), count:(.count|num), userCount:((.userCount // .user_count)|num), firstSeen:((.firstSeen // .first_seen)|text), lastSeen:((.lastSeen // .last_seen)|text), assignedTo:(if .assignedTo == null then "" elif (.assignedTo|type)=="object" then ((.assignedTo.name // .assignedTo.email // .assignedTo.id)|text) else (.assignedTo|text) end), permalink:((.permalink // .web_url // "")|text)}));
+    (($e.entries // []) | if type == "array" then .[0:$max] else [] end |
+      (first(.[] | select(.type == "exception" or .type == "stacktrace")) // {})) as $entry |
+    (($entry.data.values // []) | if type == "array" then (.[0] // {}) else {} end |
+      (.stacktrace.frames // []) | if type == "array" then .[0:$max] else [] end) as $frames |
+    (($e.tags // $i.tags // []) | if type == "array" then .[0:$max] else [] end) as $tags |
+    (($e.breadcrumbs.values // []) | if type == "array" then .[0:$max] else [] end) as $breadcrumbs |
+    ($i.metadata | if type == "object" then . else {} end) as $metadata |
+    {schemaVersion:1,state:"ready",issue:issue,
+     metadata:{type:($metadata.type|text),value:($metadata.value|text),filename:($metadata.filename|text),function:($metadata.function|text)},
+     tags:($tags | map(if type=="array" then {key:(.[0]|shorttext),value:(.[1]|text)} elif type=="object" then {key:((.key // .name // "")|shorttext),value:((.value // "")|text)} else empty end)),
+     stacktrace:($frames | map(frame)),
+     breadcrumbs:($breadcrumbs | map({timestamp:(.timestamp|shorttext),category:(.category|shorttext),message:((.message // .data // "")|longtext),level:(.level|shorttext)}))}
   '
 }
 
@@ -242,18 +316,32 @@ valid_filter_csv() {
 }
 
 command_configure() {
-  local base="" org="" projects="" environments="production" token="" token_stdin=0 arg
+  local base="" org="" projects="" environments="production" token="" token_stdin=0 arg normalized_setup input_bytes
   # Service.qml sends setup as one JSON line. A raw token is still accepted
   # with --token-stdin, but tokens are never accepted as arguments.
   if { [ "$#" -eq 0 ] || { [ "$#" -eq 1 ] && [ "${1:-}" = "--token-stdin" ]; }; } && [ ! -t 0 ]; then
     local setup_line=""
-    IFS= read -r setup_line || :
-    if [ -n "$setup_line" ] && jq -e 'type == "object"' >/dev/null 2>&1 <<<"$setup_line"; then
-      base=$(jq -r '.baseUrl // .base_url // empty' <<<"$setup_line")
-      org=$(jq -r '.organization // .org // empty' <<<"$setup_line")
-      projects=$(jq -r 'if (.projects|type)=="array" then (.projects|map(tostring)|join(",")) elif .projects == null then "" else (.projects|tostring) end' <<<"$setup_line")
-      environments=$(jq -r 'if has("environments") then (if (.environments|type)=="array" then (.environments|map(tostring)|join(",")) elif .environments == null then "" else (.environments|tostring) end) else "production" end' <<<"$setup_line")
-      token=$(jq -r '.token // empty' <<<"$setup_line")
+    IFS= read -r -n $((MAX_STDIN_BYTES + 1)) setup_line || :
+    input_bytes=$(printf '%s' "$setup_line" | wc -c)
+    [ "$input_bytes" -le "$MAX_STDIN_BYTES" ] || die invalid-input "setup payload exceeds the size limit"
+    if [ -n "$setup_line" ] && jq -Rse 'fromjson | type == "object"' >/dev/null 2>&1 <<<"$setup_line"; then
+      normalized_setup=$(jq -cer --argjson max "$MAX_FILTER_ITEMS" '
+        def scalar($limit): if type == "string" then .[0:$limit] else "" end;
+        def csv:
+          if type == "array" then .[0:$max] | map(select(type == "string") | .[0:128]) | join(",")
+          elif type == "string" then .[0:2580]
+          else "" end;
+        {baseUrl:((.baseUrl // .base_url // "") | scalar(2048)),
+         organization:((.organization // .org // "") | scalar(128)),
+         projects:(.projects | csv),
+         environments:(if has("environments") then (.environments | csv) else "production" end),
+         token:(if (.token|type) == "string" then .token else "" end)}
+      ' <<<"$setup_line") || die invalid-input "invalid setup payload"
+      base=$(jq -r '.baseUrl' <<<"$normalized_setup")
+      org=$(jq -r '.organization' <<<"$normalized_setup")
+      projects=$(jq -r '.projects' <<<"$normalized_setup")
+      environments=$(jq -r '.environments' <<<"$normalized_setup")
+      token=$(jq -r '.token' <<<"$normalized_setup")
       token_stdin=1
     fi
   fi
@@ -279,21 +367,23 @@ command_configure() {
   [ -n "$base" ] && valid_url "$base" || die invalid-input "base URL must use HTTPS (or localhost HTTP)"
   valid_identifier "$org" || die invalid-input "invalid organization"
   if [ -n "$projects" ]; then
-    local p
+    local p project_count=0
     IFS=',' read -r -a p <<<"$projects"
     for project in "${p[@]}"; do
       project=$(printf '%s' "$project" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')
       valid_identifier "$project" || die invalid-input "invalid project"
+      project_count=$((project_count + 1)); [ "$project_count" -le "$MAX_FILTER_ITEMS" ] || die invalid-input "too many projects"
     done
   fi
   valid_filter_csv "$environments"
   if [ "$token_stdin" -eq 1 ] && [ -z "$token" ]; then
-    IFS= read -r -s token || :
+    IFS= read -r -s -n $((MAX_TOKEN_BYTES + 1)) token || :
   elif [ "$token_stdin" -ne 1 ]; then
     # A token is intentionally never accepted as a command-line argument.
     die invalid-input "provide the API token with --token-stdin"
   fi
   [ -n "$token" ] || die invalid-input "empty API token"
+  [[ "$token" =~ ^[A-Za-z0-9._~-]{1,4096}$ ]] || die invalid-input "invalid API token format"
   command -v secret-tool >/dev/null 2>&1 || die dependency-missing "secret-tool is required to store the token"
   write_config "$(clean_url "$base")" "$org" "$projects" "$environments"
   BASE_URL=$(clean_url "$base") ORG="$org"
@@ -308,13 +398,13 @@ command_configure() {
 command_status() {
   if demo_enabled; then jq -cn '{schemaVersion:1,state:"ready",configured:true,demo:true}'; return; fi
   if config_exists && load_config; then
-    if secret_lookup >/dev/null 2>&1; then jq -cn --arg base "$BASE_URL" --arg organization "$ORG" '{schemaVersion:1,state:"ready",configured:true,baseUrl:$base,organization:$organization}'
+    if secret_available; then jq -cn --arg base "$BASE_URL" --arg organization "$ORG" '{schemaVersion:1,state:"ready",configured:true,baseUrl:$base,organization:$organization}'
     else jq -cn --arg base "$BASE_URL" --arg organization "$ORG" '{schemaVersion:1,state:"setup",configured:false,baseUrl:$base,organization:$organization,message:"Sentry token is not available"}'; fi
   else jq -cn '{schemaVersion:1,state:"unconfigured",configured:false}'; fi
 }
 
 command_list() {
-  local limit=${1:-50} normalized url projects_q="" environments_q="" project environment
+  local limit=${1:-50} normalized url projects_q="" environments_q="" project environment cached_source
   [[ "$limit" =~ ^[0-9]+$ ]] && [ "$limit" -ge 10 ] && [ "$limit" -le 100 ] || die invalid-input "issue limit must be 10-100"
   if demo_enabled; then demo_list "$limit"; return; fi
   config_or_die; validate_timeouts
@@ -322,7 +412,15 @@ command_list() {
   if [ -n "$PROJECTS" ]; then IFS=',' read -r -a projects_arr <<<"$PROJECTS"; for project in "${projects_arr[@]}"; do projects_q="$projects_q&project=$(urlencode "$project")"; done; fi
   if [ -n "${ENVIRONMENTS:-}" ]; then IFS=',' read -r -a environments_arr <<<"$ENVIRONMENTS"; for environment in "${environments_arr[@]}"; do environments_q="$environments_q&environment=$(urlencode "$environment")"; done; fi
   url="$BASE_URL/api/0/organizations/$ORG/issues/?query=is%3Aunresolved&limit=$limit&sort=date&expand=inbox$projects_q$environments_q"
-  curl_api GET "$url" || { if [ -f "$LIST_CACHE" ]; then emit_list "$LIST_CACHE" stale true; else die network-error "$API_ERROR"; fi; return; }
+  if ! curl_api GET "$url"; then
+    cached_source=$(tmpfile); normalized=$(tmpfile)
+    if copy_bounded_regular_file "$LIST_CACHE" "$cached_source" "$MAX_CACHE_BYTES" && normalize_list "$cached_source" "$normalized" "$limit"; then
+      emit_list "$normalized" stale true
+    else
+      die network-error "$API_ERROR"
+    fi
+    return
+  fi
   normalized=$(tmpfile); normalize_list "$API_BODY" "$normalized" "$limit" || die api-error "invalid Sentry issue response"
   cache_list "$normalized" || :
   emit_list "$normalized" ready false
@@ -359,13 +457,17 @@ command_action() {
     ignore) local duration=${3:-}; [[ "$duration" =~ ^[0-9]+$ ]] && [ "$duration" -ge 1 ] && [ "$duration" -le 43200 ] || die invalid-input "ignore duration must be 1-43200 minutes"; payload=$(jq -cn --argjson d "$duration" '{status:"ignored",statusDetails:{ignoreDuration:$d}}');;
     assign)
       curl_api GET "$BASE_URL/api/0/users/me/" || die network-error "could not determine current Sentry user"
-      user=$(jq -er '.id // empty' "$API_BODY" 2>/dev/null) || die api-error "Sentry user response had no id"
+      user=$(jq -Rer 'fromjson | (.id // empty) | if type == "string" or type == "number" then tostring | .[0:129] else empty end' "$API_BODY" 2>/dev/null) || die api-error "Sentry user response had no id"
       valid_identifier "$user" || die api-error "invalid Sentry user id"
       payload=$(jq -cn --arg user "$user" '{assignedTo:$user}');;
     *) die invalid-input "unsupported action";;
   esac
   curl_api PUT "$BASE_URL/api/0/organizations/$ORG/issues/$id/" "$payload" || die network-error "$API_ERROR"
-  if jq -e . "$API_BODY" >/dev/null 2>&1; then issue=$(normalize_issue <"$API_BODY"); else issue=$(jq -cn --arg id "$id" '{id:$id}'); fi
+  if jq -Rse 'fromjson | type == "object"' "$API_BODY" >/dev/null 2>&1; then
+    issue=$(normalize_issue <"$API_BODY") || issue=$(jq -cn --arg id "$id" '{id:$id}')
+  else
+    issue=$(jq -cn --arg id "$id" '{id:$id}')
+  fi
   jq -cn --arg action "$action" --argjson issue "$issue" '{schemaVersion:1,state:"ready",action:$action,issue:$issue}'
 }
 
@@ -379,10 +481,12 @@ command_clear_token() {
 }
 
 command_notify() {
-  local id=${1:-} issues f input identity title permalink body
+  local id=${1:-} issues f input identity title permalink body input_bytes
   if [ ! -t 0 ]; then
-    IFS= read -r input || input=""
-    if [ -n "$input" ] && jq -e 'type == "object"' >/dev/null 2>&1 <<<"$input"; then
+    IFS= read -r -n $((MAX_NOTIFY_BYTES + 1)) input || input=""
+    input_bytes=$(printf '%s' "$input" | wc -c)
+    [ "$input_bytes" -le "$MAX_NOTIFY_BYTES" ] || die invalid-input "notification payload exceeds the size limit"
+    if [ -n "$input" ] && jq -Rse 'fromjson | type == "object"' >/dev/null 2>&1 <<<"$input"; then
       identity=$(jq -nr --argjson input "$input" --arg fallback "$id" '($input.identity // $input.id // $fallback // "") | tostring | gsub("[[:cntrl:]]";"") | .[0:256]')
       title=$(jq -r '.title // "Trace regression"' <<<"$input")
       permalink=$(jq -r '.permalink // empty' <<<"$input")
@@ -397,10 +501,10 @@ command_notify() {
   if [ -n "$id" ]; then issue_arg "$id"; command_detail "$id" | jq -c '{schemaVersion:1,state:.state,notification:(.issue // {})}'; return; fi
   if demo_enabled; then
     f=$(tmpfile); normalize_list "$FIXTURE_DIR/issues.json" "$f" || die fixture-error "invalid demo issue fixture"
-    jq -cn --slurpfile i "$f" '{schemaVersion:1,state:"ready",notification:(($i[0] // []) | map(select(.isRegression == true))[0] // {})}'
+    jq -cn --slurpfile i "$f" '{schemaVersion:1,state:"ready",notification:(first(($i[0] // [])[] | select(.isRegression == true)) // {})}'
   else
     f=$(tmpfile); command_list >"$f" || die network-error "could not list issues"
-    jq -cn --slurpfile i "$f" '{schemaVersion:1,state:"ready",notification:(($i[0].issues // []) | map(select(.isRegression == true))[0] // {})}'
+    jq -cn --slurpfile i "$f" '{schemaVersion:1,state:"ready",notification:(first(($i[0].issues // [])[] | select(.isRegression == true)) // {})}'
   fi
 }
 
